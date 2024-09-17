@@ -11,13 +11,16 @@ from matplotlib import pyplot as plt
 import torch.nn.functional as F
 
 
-def process_clickmaps(clickmap_csv):
+def process_clickmaps(clickmap_csv, is_training=True):
     clickmaps = {}
     num_maps = []
     processed_maps = {}
     n_empty = 0
     for index, row in clickmap_csv.iterrows():
-        image_file_name = row['image_path'].replace("CO3D_ClickMe2/", "")
+        if is_training:
+            image_file_name = row['image_path'].replace("CO3D_ClickMe2/", "")
+        else:
+            image_file_name = row['image_path'].replace("CO3D_ClickMe_Training2/", "")
         if image_file_name not in clickmaps.keys():
             clickmaps[image_file_name] = [row["clicks"]]
         else:

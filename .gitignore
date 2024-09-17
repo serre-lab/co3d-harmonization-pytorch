@@ -1,4 +1,6 @@
-.DS_Store/
+.DS_Store
+
+data/.DS_Store
 
 wandb/
  
@@ -6,4 +8,6 @@ assets/
 
 human_clickme_data_processing/
 
-data/CO3D_ClickMe2/
+data/CO3D_ClickMe_Validation/
+
+data/CO3D_ClickMe_Training/

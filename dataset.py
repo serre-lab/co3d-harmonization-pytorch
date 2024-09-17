@@ -57,11 +57,15 @@ class ClickMe(Dataset):
         self.is_training = is_training
         self.data = []
 
-        image_path = "data/CO3D_ClickMe2/"
+        if is_training:
+            image_path = "data/CO3D_ClickMe_Training/"
+            co3d_clickme = pd.read_csv("data/CO3D_ClickMe_Training.csv")
+        else:
+            image_path = "data/CO3D_ClickMe_Validation/"
+            co3d_clickme = pd.read_csv("data/CO3D_ClickMe_Validation.csv")
         output_dir = "assets"
         image_output_dir = "clickme_test_images"
         img_heatmaps = {}
-        co3d_clickme = pd.read_csv("data/clickme_vCO3D.csv")
         image_shape = [256, 256]
         thresh = 50
         exponential_decay = False
@@ -72,7 +76,7 @@ class ClickMe(Dataset):
         os.makedirs(image_output_dir, exist_ok=True)
         os.makedirs(output_dir, exist_ok=True)
 
-        processed_maps, num_maps = process_clickmaps(co3d_clickme)
+        processed_maps, num_maps = process_clickmaps(co3d_clickme, is_training=is_training)
         gaussian_kernel = utils.gaussian_kernel(size=BRUSH_SIZE, sigma=BRUSH_SIZE_SIGMA)
         for idx, (image, maps) in enumerate(processed_maps.items()):
             image_name, image, heatmap = make_heatmap(os.path.join(image_path, image), maps, gaussian_kernel, image_shape=image_shape, exponential_decay=exponential_decay)
