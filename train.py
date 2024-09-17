@@ -61,7 +61,7 @@ def main(args):
     optimizer = optim.Adam(model.parameters(), lr=args.learning_rate)
     
 
-    gaussian_kernel = utils.gaussian_kernel(size=BRUSH_SIZE, sigma=BRUSH_SIZE_SIGMA)
+    gaussian_kernel = utils.gaussian_kernel(size=BRUSH_SIZE, sigma=BRUSH_SIZE_SIGMA).to(device)
 
     for epoch in range(args.num_epochs):
         model.train()
