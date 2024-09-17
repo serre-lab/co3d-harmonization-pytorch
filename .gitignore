@@ -1,3 +1,8 @@
+<<<<<<< HEAD
+=======
+__pycache__/
+
+>>>>>>> a83b5cb (minor fixes)
 .DS_Store
 
 data/.DS_Store

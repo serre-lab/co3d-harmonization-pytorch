@@ -91,6 +91,7 @@ def main(args):
             loss.backward()
             optimizer.step()
 
+            train_loss += loss.item()
             train_correct += (torch.argmax(outputs, dim=1) == targets).sum().item()
             total_samples += targets.size(0) 
     
