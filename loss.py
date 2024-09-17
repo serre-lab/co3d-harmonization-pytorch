@@ -115,7 +115,7 @@ def harmonizer_loss(predicted_label, true_label, saliency_maps, clickme_maps, la
     # Compute losses
     pyramidal_loss = pyramidal_mse(saliency_maps, clickme_maps)
     cce_loss = nn.CrossEntropyLoss()(predicted_label, true_label)
-    harmonization_loss = cce_loss + pyramidal_loss * lambda_harmonization
+    harmonization_loss = pyramidal_loss * lambda_harmonization
 
     return harmonization_loss, cce_loss
 
