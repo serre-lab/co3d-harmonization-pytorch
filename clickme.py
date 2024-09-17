@@ -18,18 +18,12 @@ def process_clickmaps(clickmap_csv, is_training=True):
     n_empty = 0
     for index, row in clickmap_csv.iterrows():
         if is_training:
-<<<<<<< HEAD
-            image_file_name = row['image_path'].replace("CO3D_ClickMe2/", "")
-        else:
-            image_file_name = row['image_path'].replace("CO3D_ClickMe_Training2/", "")
-=======
             # Skipping CO3D Validation Images and Imagenet Images
             if "CO3D_ClickMe2" in row['image_path'] or "imagenet" in row['image_path']:
                 continue
             image_file_name = row['image_path'].replace("CO3D_ClickMe_Training2/", "")
         else:
             image_file_name = row['image_path'].replace("CO3D_ClickMe2/", "")
->>>>>>> a83b5cb (minor fixes)
         if image_file_name not in clickmaps.keys():
             clickmaps[image_file_name] = [row["clicks"]]
         else:
