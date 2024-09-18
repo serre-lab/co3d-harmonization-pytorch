@@ -180,7 +180,7 @@ class ClickMe(Dataset):
         center_crop=[224, 224]
         img, hmp, label = self.data[index]['image'], self.data[index]['heatmap'], self.data[index]['category_label']
 
-        print("Data Label:", self.data[index]['category_label'])
+        # print("Data Label:", self.data[index]['category_label'])
 
         # print("GI img: ", img)  
         image_name = img.split("/")[2]

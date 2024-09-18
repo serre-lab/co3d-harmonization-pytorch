@@ -81,7 +81,7 @@ def main(args):
         total_samples = 0
 
         for batch in tqdm(train_loader, desc=f"Training Epoch {epoch+1}/{args.num_epochs}"):
-            print(f"Batch: {batch}")
+            # print(f"Batch: {batch}")
             images, heatmaps, targets = batch[0], batch[1], batch[2]
             images, heatmaps, targets = images.to(device), heatmaps.to(device), targets.to(device)
 
@@ -93,58 +93,48 @@ def main(args):
                 y_pred = model(images) 
 
 
-            # For each image in the batch, compute the saliency map if heatmaps are provided
-            
-                if len(heatmaps) != 0:
+            heatmap_count = 0
+            total_cce_loss = 0.0
+            total_harmonization_loss = 0.0
+            for image, heatmap, target, predicted_label in zip(images, heatmaps, targets, y_pred):            
+                if len(heatmap) != 0:
+                    heatmap_count += 1
                     # 1. Fist Approach (from the Harmonization GitHub):
                     # Most probable class for each image in the batch
-                    most_probable_class = torch.argmax(y_pred, dim=-1)  # Get index of the most probable class for each image
+                    most_probable_class = torch.argmax(predicted_label, dim=-1)  # Get index of the most probable class for each image
                     # Scores of the most probable class for each image
-                    most_probable_scores = y_pred[torch.arange(y_pred.size(0)), most_probable_class]  # Shape: (batch_size,)
+                    most_probable_scores = predicted_label[torch.arange(predicted_label.size(0)), most_probable_class]  # Shape: (batch_size,)
                     # Compute the gradient of the most probable class score w.r.t. input images
-                    saliency_maps = torch.autograd.grad(outputs=most_probable_scores, inputs=images,
+                    saliency_map = torch.autograd.grad(outputs=most_probable_scores, inputs=image,
                                             grad_outputs=torch.ones_like(most_probable_scores),
                                             create_graph=True)[0]
-                    saliency_maps = saliency_maps.mean(dim=1)  # Averaging across the channels to get shape: (batch_size, height, width)
+                    saliency_map = saliency_map.mean(dim=1)  # Averaging across the channels to get shape: (batch_size, height, width)
+                    
+                    heatmap = utils.gaussian_blur(heatmaps.unsqueeze(1), gaussian_kernel).unsqueeze(1)
+                    saliency_map = utils.gaussian_blur(saliency_map.unsqueeze(1), gaussian_kernel).unsqueeze(1)
 
+                    harmonization_loss, _ = harmonizer_loss(predicted_label, target, heatmap, saliency_map)
+                    total_harmonization_loss += harmonization_loss
+            total_cce_loss += nn.CrossEntropyLoss()(predicted_label, target)
 
-            # # 2. Second Approach (Tony's):
-            # correct_class_scores = y_pred.gather(1, targets.view(-1, 1)).squeeze()
-            # device = images.device
-            # ones_tensor = torch.ones(correct_class_scores.shape).to(device) # scores is a tensor here, need to supply initial gradients of same tensor shape as scores.
-            # # Saliency map
-            # grads = torch.autograd.grad(outputs=correct_class_scores, inputs=images, grad_outputs=ones_tensor, retain_graph=True, create_graph=True, only_inputs=True)[0]
-            # saliency_maps = torch.mean(grads, dim=1, keepdim=True)
+            total_loss = total_cce_loss/len(images)
+            if heatmap_count > 0:
+                total_loss += total_harmonization_loss/heatmap_count
 
-            # # 3. Third Approach (from scratch):
-            # arg_idx = torch.argmax(y_pred, dim=1)  # Get the index of the most probable class for each image in the batch
-            # y = y_pred[torch.arange(y_pred.size(0)), arg_idx]  # Get the predicted score of the most probable class
-            # # Compute the gradient of the sum of the most probable class scores w.r.t. the input images
-            # y.sum().backward(retain_graph=True)
-            # # # The gradients w.r.t. the input images
-            # saliency_maps = images.grad  # Shape: (batch_size, channels, height, width)
-            # # # Mean of the gradients across channels to get a 2D saliency map
-            # saliency_maps = saliency_maps.mean(dim=1)  # Shape: (batch_size, height, width)
-
-                heatmaps = utils.gaussian_blur(heatmaps.unsqueeze(1), gaussian_kernel).unsqueeze(1)
-                saliency_maps = utils.gaussian_blur(saliency_maps.unsqueeze(1), gaussian_kernel).unsqueeze(1)
-
-             # Index 0 -> harmonization loss, Index 1 -> cross entropy loss
-            harmonization_loss, cce_loss = harmonizer_loss(y_pred, targets, heatmaps, saliency_maps)
-            total_loss = harmonization_loss + cce_loss
             total_loss.backward()
+
             optimizer.step()
 
             train_loss += total_loss.item()
-            total_cce_loss += cce_loss.item()
-            total_harmonization_loss += harmonization_loss.item()
+            total_cce_loss += total_cce_loss.item()
+            # total_harmonization_loss += total_harmonization_loss.item()
             train_correct += (torch.argmax(y_pred, dim=1) == targets).sum().item()
             total_samples += targets.size(0) 
     
         train_acc = train_correct / total_samples
          
         print(f"Epoch [{epoch+1}/{args.num_epochs}], Train Loss: {train_loss/len(train_loader):.4f}, Train Acc: {train_acc:.4f}")
-        wandb.log({"train_loss": train_loss/len(train_loader), "train_acc": train_acc, "epoch": epoch, "cce_loss": total_cce_loss, "harmonization_loss": total_harmonization_loss})
+        wandb.log({"train_loss": train_loss/len(train_loader), "train_acc": train_acc, "cce_loss": total_cce_loss, "harmonization_loss": total_harmonization_loss})
         eval_alignment(model, val_loader, device, epoch, None, list(range(10)), args)
             #   f"Val Loss: {val_loss/len(val_loader):.4f}")
 
@@ -303,3 +293,29 @@ def eval_alignment(full_model:torch.nn.Module, test_data_loader, device: torch.d
 if __name__ == "__main__":
     args = parse_args()
     main(args)
+
+            # # 2. Second Approach (Tony's):
+            # correct_class_scores = y_pred.gather(1, targets.view(-1, 1)).squeeze()
+            # device = images.device
+            # ones_tensor = torch.ones(correct_class_scores.shape).to(device) # scores is a tensor here, need to supply initial gradients of same tensor shape as scores.
+            # # Saliency map
+            # grads = torch.autograd.grad(outputs=correct_class_scores, inputs=images, grad_outputs=ones_tensor, retain_graph=True, create_graph=True, only_inputs=True)[0]
+            # saliency_maps = torch.mean(grads, dim=1, keepdim=True)
+
+            # # 3. Third Approach (from scratch):
+            # arg_idx = torch.argmax(y_pred, dim=1)  # Get the index of the most probable class for each image in the batch
+            # y = y_pred[torch.arange(y_pred.size(0)), arg_idx]  # Get the predicted score of the most probable class
+            # # Compute the gradient of the sum of the most probable class scores w.r.t. the input images
+            # y.sum().backward(retain_graph=True)
+            # # # The gradients w.r.t. the input images
+            # saliency_maps = images.grad  # Shape: (batch_size, channels, height, width)
+            # # # Mean of the gradients across channels to get a 2D saliency map
+            # saliency_maps = saliency_maps.mean(dim=1)  # Shape: (batch_size, height, width)
+
+            #     heatmaps = utils.gaussian_blur(heatmaps.unsqueeze(1), gaussian_kernel).unsqueeze(1)
+            #     saliency_maps = utils.gaussian_blur(saliency_maps.unsqueeze(1), gaussian_kernel).unsqueeze(1)
+
+            #  # Index 0 -> harmonization loss, Index 1 -> cross entropy loss
+            # harmonization_loss, cce_loss = harmonizer_loss(y_pred, targets, heatmaps, saliency_maps)
+            # total_loss = harmonization_loss + cce_loss
+            # total_loss.backward()
