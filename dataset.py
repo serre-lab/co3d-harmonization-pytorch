@@ -78,6 +78,7 @@ class ClickMe(Dataset):
             processed_maps, num_maps = process_clickmaps(co3d_clickme, is_training=is_training)
             gaussian_kernel = utils.gaussian_kernel(size=BRUSH_SIZE, sigma=BRUSH_SIZE_SIGMA)
             for idx, (image, maps) in enumerate(processed_maps.items()):
+                full_path = os.path.join(image_path, image)
                 image_name, image, heatmap = make_heatmap(os.path.join(image_path, image), maps, gaussian_kernel, image_shape=image_shape, exponential_decay=exponential_decay)
                 # print(f"image_name: {image_name}")
                 label = image_name.split("/")[2]
@@ -89,13 +90,13 @@ class ClickMe(Dataset):
                     continue
                 # img_heatmaps[image_name] = {"image":image, "heatmap":heatmap}
                 image_name = "_".join(image_name.split("/")[-2:])
-                self.data_dictionary[image_name] = {"image":image, "heatmap":heatmap, "category_label":self.label_to_category_map[label]}
+                self.data_dictionary[image_name] = {"image":full_path, "heatmap":heatmap, "category_label":self.label_to_category_map[label]}
                 # print("1 image_name: ", image_name)
 
             print("Done processing training images WITH ClickMaps.")
 
             # TODO: Change recursive "projects"
-            text_file = "/cifs/data/tserre_lrs/projects/projects/prj_video_imagenet/CausalVisionModeling/data_lists/filtered_binocular_renders_train.txt"
+            text_file = "/cifs/data/tserre_lrs/projects/projects/prj_video_imagenet/CausalVisionModeling/data_lists/filtered_binocular_renders_test.txt"
             root_dir = "/cifs/data/tserre_lrs/projects/projects/prj_video_imagenet/PeRFception/data/co3d_v2/"
 
             with open(text_file, 'r') as file:
@@ -179,7 +180,7 @@ class ClickMe(Dataset):
         # print("Data Label:", self.data[index]['category_label'])
 
         # print("GI img: ", img)  
-        image_name = img.split("/")[2]
+        image_name = img#.split("/")[2]
         img = Image.open(img)
         img = tvF.center_crop(img, center_crop)
 
