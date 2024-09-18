@@ -68,6 +68,9 @@ def main(args):
 
     gaussian_kernel = utils.gaussian_kernel(size=BRUSH_SIZE, sigma=BRUSH_SIZE_SIGMA).to(device)
 
+    print(f"Image 1 of Training Set: {train_dataset[0][0].shape}")
+    print(f"Image 1 of Validation Set: {val_dataset[0][0].shape}")
+
     for epoch in range(args.num_epochs):
         model.train()
         train_loss = 0.0
@@ -78,6 +81,7 @@ def main(args):
         total_samples = 0
 
         for batch in tqdm(train_loader, desc=f"Training Epoch {epoch+1}/{args.num_epochs}"):
+            print(f"Batch: {batch}")
             images, heatmaps, targets = batch[0], batch[1], batch[2]
             images, heatmaps, targets = images.to(device), heatmaps.to(device), targets.to(device)
 
@@ -88,16 +92,20 @@ def main(args):
             with torch.backends.cuda.sdp_kernel(enable_flash=False, enable_math=True, enable_mem_efficient=False):
                 y_pred = model(images) 
 
-                # 1. Fist Approach (from the Harmonization GitHub):
-                # Most probable class for each image in the batch
-                most_probable_class = torch.argmax(y_pred, dim=-1)  # Get index of the most probable class for each image
-                # Scores of the most probable class for each image
-                most_probable_scores = y_pred[torch.arange(y_pred.size(0)), most_probable_class]  # Shape: (batch_size,)
-                # Compute the gradient of the most probable class score w.r.t. input images
-                saliency_maps = torch.autograd.grad(outputs=most_probable_scores, inputs=images,
-                                        grad_outputs=torch.ones_like(most_probable_scores),
-                                        create_graph=True)[0]
-            saliency_maps = saliency_maps.mean(dim=1)  # Averaging across the channels to get shape: (batch_size, height, width)
+
+            # For each image in the batch, compute the saliency map if heatmaps are provided
+            
+                if len(heatmaps) != 0:
+                    # 1. Fist Approach (from the Harmonization GitHub):
+                    # Most probable class for each image in the batch
+                    most_probable_class = torch.argmax(y_pred, dim=-1)  # Get index of the most probable class for each image
+                    # Scores of the most probable class for each image
+                    most_probable_scores = y_pred[torch.arange(y_pred.size(0)), most_probable_class]  # Shape: (batch_size,)
+                    # Compute the gradient of the most probable class score w.r.t. input images
+                    saliency_maps = torch.autograd.grad(outputs=most_probable_scores, inputs=images,
+                                            grad_outputs=torch.ones_like(most_probable_scores),
+                                            create_graph=True)[0]
+                    saliency_maps = saliency_maps.mean(dim=1)  # Averaging across the channels to get shape: (batch_size, height, width)
 
 
             # # 2. Second Approach (Tony's):
@@ -118,8 +126,8 @@ def main(args):
             # # # Mean of the gradients across channels to get a 2D saliency map
             # saliency_maps = saliency_maps.mean(dim=1)  # Shape: (batch_size, height, width)
 
-            heatmaps = utils.gaussian_blur(heatmaps.unsqueeze(1), gaussian_kernel).unsqueeze(1)
-            saliency_maps = utils.gaussian_blur(saliency_maps.unsqueeze(1), gaussian_kernel).unsqueeze(1)
+                heatmaps = utils.gaussian_blur(heatmaps.unsqueeze(1), gaussian_kernel).unsqueeze(1)
+                saliency_maps = utils.gaussian_blur(saliency_maps.unsqueeze(1), gaussian_kernel).unsqueeze(1)
 
              # Index 0 -> harmonization loss, Index 1 -> cross entropy loss
             harmonization_loss, cce_loss = harmonizer_loss(y_pred, targets, heatmaps, saliency_maps)
@@ -137,7 +145,7 @@ def main(args):
          
         print(f"Epoch [{epoch+1}/{args.num_epochs}], Train Loss: {train_loss/len(train_loader):.4f}, Train Acc: {train_acc:.4f}")
         wandb.log({"train_loss": train_loss/len(train_loader), "train_acc": train_acc, "epoch": epoch, "cce_loss": total_cce_loss, "harmonization_loss": total_harmonization_loss})
-        # eval_alignment(model, val_loader, device, epoch, None, list(range(10)), args)
+        eval_alignment(model, val_loader, device, epoch, None, list(range(10)), args)
             #   f"Val Loss: {val_loss/len(val_loader):.4f}")
 
     print(f"Training completed. Model saved to {args.output_model}")
@@ -156,99 +164,141 @@ def eval_alignment(full_model:torch.nn.Module, test_data_loader, device: torch.d
     # Set the model to eval mode
     full_model.eval()
 
+    gaussian_kernel = utils.gaussian_kernel(size=BRUSH_SIZE, sigma=BRUSH_SIZE_SIGMA).to(device)
+
     kernel = utils.gaussian_kernel(size=BRUSH_SIZE, sigma=math.sqrt(BRUSH_SIZE)).to(device)
     for i, batch in tqdm(enumerate(test_data_loader)):
-        imgs, hmps, labels, img_names, cat = batch
-        imgs, hmps, labels = imgs.to(device), hmps.to(device), labels.to(device)
-        img_name = img_names[0]
-        cat = cat[0]
-        sub_vec = np.where(test_data_loader.dataset.categories != cat)[0]
-        random_idx = np.random.choice(sub_vec)
-        random_hmps = test_data_loader.dataset[random_idx]
-        random_hmps = torch.unsqueeze(torch.Tensor(random_hmps[1]), 0)
+        images, heatmaps, targets, image_name = batch[0], batch[1], batch[2], batch[3]
+        images, heatmaps, targets = images.to(device), heatmaps.to(device), targets.to(device)
+        cat = torch.argmax(targets).item()
+        # cat = cat[0]
+        # sub_vec = np.where(test_data_loader.dataset.categories != cat)[0]
+        # random_idx = np.random.choice(sub_vec)
+        # random_hmps = test_data_loader.dataset[random_idx]
+        # random_hmps = torch.unsqueeze(torch.Tensor(random_hmps[1]), 0)
 
         if cat not in category_alignments.keys():
             category_alignments[cat] = []
             category_nulls[cat] = []
-        img_name = img_name.replace(f'{cat}_', f'{cat}/')
+        # img_name = img_name.replace(f'{cat}_', f'{cat}/')
         if len(visualize)>0 and i in visualize:
-            img = imgs.clone().detach().cpu().numpy().squeeze()
+            img = images.clone().detach().cpu().numpy().squeeze()
             img = np.moveaxis(img, 0, -1)
             # img = img*args.std + args.mean
-            img = img*full_model.std + full_model.mean
+            # img = img*full_model.std + full_model.mean
             img = np.uint8(255*img)
-        imgs.requires_grad = True
-        outputs = full_model(imgs)
-        loss = criterion(outputs, labels)
+        images.requires_grad = True
+        with torch.backends.cuda.sdp_kernel(enable_flash=False, enable_math=True, enable_mem_efficient=False):
+            outputs = full_model(images)
+            loss = criterion(outputs, targets)
 
-        test_acc = utils.accuracy(outputs, labels)[0].item()
-        all_test_acc.append(test_acc)
-        arg_idx = outputs.argmax()
-        y = outputs[0][arg_idx]
-        y.backward()
-        saliency = torch.amax(imgs.grad.abs(), dim=1)
-        flat_saliency = saliency.flatten()
-        topk, indices = torch.topk(flat_saliency, int(medians[img_name]))
-        top_k_saliency = torch.zeros(flat_saliency.shape).to(device)
-        top_k_saliency = top_k_saliency.scatter_(-1, indices.to(device), topk.to(device))
-        top_k_saliency = top_k_saliency.reshape(saliency.shape)
-        top_k_saliency = F.interpolate(top_k_saliency.unsqueeze(0), size=(224, 224), mode="bilinear").to(torch.float32)
-        hmps = tvF.center_crop(hmps, (224, 224))
-        random_hmps = tvF.center_crop(random_hmps, (224, 224))
-        top_k_saliency = utils.gaussian_blur(saliency, kernel)
-        top_k_saliency = top_k_saliency.detach().cpu().numpy()
-        hmps = hmps.detach().cpu().numpy()
-        random_hmps = random_hmps.detach().cpu().numpy()
-        topk_score, p_value = spearmanr(top_k_saliency.ravel(), hmps.ravel())
-        null_score, p_value = spearmanr(top_k_saliency.ravel(), random_hmps.ravel())
+            test_acc = (torch.argmax(outputs, dim=1) == targets).sum().item()
+            all_test_acc.append(test_acc)
 
-        if len(visualize)>0 and i in visualize:
-            top_k_img = top_k_saliency.squeeze()
-            #top_k_overlay = utils.save_as_overlay(img, top_k_img, os.path.join(args.output_dir,f'topk_blur_{str(i).zfill(3)}.png'))
-            hmps_img = hmps.squeeze()
-            #hmps_overlay = utils.save_as_overlay(img, hmps_img, os.path.join(args.output_dir,f'hmps_blur_{str(i).zfill(3)}.png'))
-            
-            f = plt.figure()
-            plt.subplot(1, 3, 1)
-            top_k_img = (top_k_img - np.min(top_k_img))/np.max(top_k_img)
-            plt.imshow(top_k_img)
-            plt.axis("off")
-            plt.subplot(1, 3, 2)
-            hmps_img = (hmps_img - np.min(hmps_img))/np.max(hmps_img)
-            plt.imshow(hmps_img)
-            plt.axis("off")
-            plt.subplot(1, 3, 3)
-            plt.imshow(img)
-            plt.axis("off")
-            f.tight_layout(pad=0)
-            f.canvas.draw()
-            buf = f.canvas.buffer_rgba()
-            ncols, nrows = f.canvas.get_width_height()
-            image = np.frombuffer(buf, dtype=np.uint8).reshape(nrows, ncols, 4)
-            image = torch.unsqueeze(torch.Tensor(image), 0)
-            image = image[:, int(math.floor(image.shape[1]/4)):int(image.shape[1] - math.floor(image.shape[1]/4)), :, :]
-            sample_maps.append(image)
+            most_probable_class = torch.argmax(outputs, dim=-1)  # Get index of the most probable class for each image
+            # Scores of the most probable class for each image
+            most_probable_scores = outputs[torch.arange(outputs.size(0)), most_probable_class]  # Shape: (batch_size,)
+            # Compute the gradient of the most probable class score w.r.t. input images
+            saliency_maps = torch.autograd.grad(outputs=most_probable_scores, inputs=images,
+                                    grad_outputs=torch.ones_like(most_probable_scores),
+                                    create_graph=True)[0]
+        saliency_maps = saliency_maps.mean(dim=1) 
 
-        # category_alignments[cat].append(topk_score/alignments[cat])
-        # category_nulls[cat].append(null_score/alignments[cat])
-        category_alignments[cat].append(topk_score)
-        category_nulls[cat].append(null_score)
-        topk_score /= HUMAN_SPEARMAN_CEILING
-        null_score /= HUMAN_SPEARMAN_CEILING
-        alignment_scores.append(topk_score)
-        null_scores.append(null_score)
+        heatmaps = utils.gaussian_blur(heatmaps.unsqueeze(1), gaussian_kernel).unsqueeze(1)
+        saliency_maps = utils.gaussian_blur(saliency_maps.unsqueeze(1), gaussian_kernel).unsqueeze(1)
+
+        # flat_saliency = saliency_maps.flatten()
+
+        # topk, indices = torch.topk(flat_saliency, int(medians[image_name]))
+        # top_k_saliency = torch.zeros(flat_saliency.shape).to(device)
+        # top_k_saliency = top_k_saliency.scatter_(-1, indices.to(device), topk.to(device))
+        # top_k_saliency = top_k_saliency.reshape(saliency_maps.shape)
+        # top_k_saliency = F.interpolate(top_k_saliency.unsqueeze(0), size=(224, 224), mode="bilinear").to(torch.float32)
+        # hmps = tvF.center_crop(hmps, (224, 224))
+        # random_hmps = tvF.center_crop(random_hmps, (224, 224))
+        # top_k_saliency = utils.gaussian_blur(saliency_maps, kernel)
+        # top_k_saliency = top_k_saliency.detach().cpu().numpy()
+        # hmps = hmps.detach().cpu().numpy()
+        # random_hmps = random_hmps.detach().cpu().numpy()
+        # topk_score, p_value = spearmanr(top_k_saliency.ravel(), hmps.ravel())
+        # null_score, p_value = spearmanr(top_k_saliency.ravel(), random_hmps.ravel())
+
+        alignment_score = spearman_corrcoef(saliency_maps.flatten(), heatmaps.flatten())
+
+        alignment_score /= HUMAN_SPEARMAN_CEILING
+
+        alignment_scores.append(alignment_score.detach().cpu().numpy())
+
+
+        # for cat, cat_align in category_alignments.items():
+        #     category_alignments[cat] = np.mean(cat_align)
+        #     category_nulls[cat] = np.mean(category_nulls[cat])
+        #     category_alignments[cat] = {"alignment": category_alignments[cat], "null": category_nulls[cat]}
+        # category_alignments['human'] = {"alignment": topk_score, "null": null_score}
+        # category_json = json.dumps(category_alignments, indent=4)
+        # with open(os.path.join("data", f'cat_alignment_{str(epoch).zfill(3)}.json'), 'w+') as f:
+        #     f.write(category_json)
+        # avg_test_acc = sum(all_test_acc)/float(len(all_test_acc))
+        # wandb.update(heatmaps=sample_maps, head="co3d_eval")
+        # return avg_test_acc, np.mean(alignment_scores), np.mean(null_scores)
+
     
-    for cat, cat_align in category_alignments.items():
-        category_alignments[cat] = np.mean(cat_align)
-        category_nulls[cat] = np.mean(category_nulls[cat])
-        category_alignments[cat] = {"alignment": category_alignments[cat], "null": category_nulls[cat]}
-    category_alignments['human'] = {"alignment": topk_score, "null": null_score}
-    category_json = json.dumps(category_alignments, indent=4)
-    with open(os.path.join("data", f'cat_alignment_{str(epoch).zfill(3)}.json'), 'w+') as f:
-        f.write(category_json)
-    avg_test_acc = sum(all_test_acc)/float(len(all_test_acc))
-    wandb.update(heatmaps=sample_maps, head="co3d_eval")
-    return avg_test_acc, np.mean(alignment_scores), np.mean(null_scores)
+    print(f"Alignment Score: {np.mean(alignment_scores)}, Test Accuracy: {np.mean(all_test_acc)}")
+    wandb.log({"alignment_score": np.mean(alignment_scores), "test_acc": np.mean(all_test_acc), "epoch": epoch})
+            # arg_idx = outputs.argmax()
+            # y = outputs[0][arg_idx]
+            # y.backward()
+            # saliency = torch.amax(images.grad.abs(), dim=1)
+        # flat_saliency = saliency_maps.flatten()
+
+
+    #     if len(visualize)>0 and i in visualize:
+    #         top_k_img = top_k_saliency.squeeze()
+    #         #top_k_overlay = utils.save_as_overlay(img, top_k_img, os.path.join(args.output_dir,f'topk_blur_{str(i).zfill(3)}.png'))
+    #         hmps_img = hmps.squeeze()
+    #         #hmps_overlay = utils.save_as_overlay(img, hmps_img, os.path.join(args.output_dir,f'hmps_blur_{str(i).zfill(3)}.png'))
+            
+    #         f = plt.figure()
+    #         plt.subplot(1, 3, 1)
+    #         top_k_img = (top_k_img - np.min(top_k_img))/np.max(top_k_img)
+    #         plt.imshow(top_k_img)
+    #         plt.axis("off")
+    #         plt.subplot(1, 3, 2)
+    #         hmps_img = (hmps_img - np.min(hmps_img))/np.max(hmps_img)
+    #         plt.imshow(hmps_img)
+    #         plt.axis("off")
+    #         plt.subplot(1, 3, 3)
+    #         plt.imshow(img)
+    #         plt.axis("off")
+    #         f.tight_layout(pad=0)
+    #         f.canvas.draw()
+    #         buf = f.canvas.buffer_rgba()
+    #         ncols, nrows = f.canvas.get_width_height()
+    #         image = np.frombuffer(buf, dtype=np.uint8).reshape(nrows, ncols, 4)
+    #         image = torch.unsqueeze(torch.Tensor(image), 0)
+    #         image = image[:, int(math.floor(image.shape[1]/4)):int(image.shape[1] - math.floor(image.shape[1]/4)), :, :]
+    #         sample_maps.append(image)
+
+    #     # category_alignments[cat].append(topk_score/alignments[cat])
+    #     # category_nulls[cat].append(null_score/alignments[cat])
+    #     category_alignments[cat].append(topk_score)
+    #     category_nulls[cat].append(null_score)
+    #     topk_score /= HUMAN_SPEARMAN_CEILING
+    #     null_score /= HUMAN_SPEARMAN_CEILING
+    #     alignment_scores.append(topk_score)
+    #     null_scores.append(null_score)
+    
+    # for cat, cat_align in category_alignments.items():
+    #     category_alignments[cat] = np.mean(cat_align)
+    #     category_nulls[cat] = np.mean(category_nulls[cat])
+    #     category_alignments[cat] = {"alignment": category_alignments[cat], "null": category_nulls[cat]}
+    # category_alignments['human'] = {"alignment": topk_score, "null": null_score}
+    # category_json = json.dumps(category_alignments, indent=4)
+    # with open(os.path.join("data", f'cat_alignment_{str(epoch).zfill(3)}.json'), 'w+') as f:
+    #     f.write(category_json)
+    # avg_test_acc = sum(all_test_acc)/float(len(all_test_acc))
+    # wandb.update(heatmaps=sample_maps, head="co3d_eval")
+    # return avg_test_acc, np.mean(alignment_scores), np.mean(null_scores)
 
 if __name__ == "__main__":
     args = parse_args()
