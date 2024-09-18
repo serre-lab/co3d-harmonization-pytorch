@@ -92,14 +92,10 @@ class ClickMe(Dataset):
                 self.data_dictionary[image_name] = {"image":image, "heatmap":heatmap, "category_label":self.label_to_category_map[label]}
                 # print("1 image_name: ", image_name)
 
-                if len(label_to_category_map.keys()) == 51:
-                    break
-
             print("Done processing training images WITH ClickMaps.")
 
-            # TODO: Change to Train
             # TODO: Change recursive "projects"
-            text_file = "/cifs/data/tserre_lrs/projects/projects/prj_video_imagenet/CausalVisionModeling/data_lists/filtered_binocular_renders_test.txt"
+            text_file = "/cifs/data/tserre_lrs/projects/projects/prj_video_imagenet/CausalVisionModeling/data_lists/filtered_binocular_renders_train.txt"
             root_dir = "/cifs/data/tserre_lrs/projects/projects/prj_video_imagenet/PeRFception/data/co3d_v2/"
 
             with open(text_file, 'r') as file:
