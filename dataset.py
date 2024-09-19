@@ -11,6 +11,8 @@ from utils import gaussian_kernel, gaussian_blur
 from torchvision.transforms import functional as tvF
 from clickme import process_clickmaps, make_heatmap
 import matplotlib.pyplot as plt
+from torch.utils.data import DataLoader
+import random
 
 
 # Define data transformations
@@ -41,7 +43,7 @@ class ClickMe(Dataset):
         is_training (bool): Flag to indicate if the dataset is for training.
     """
 
-    def __init__(self, image_folder, csv_path, label_to_category_map, is_training=True):
+    def __init__(self, image_folder, label_to_category_map, is_training=True):
         """
         Initialize the ClickMe dataset.
 
@@ -52,7 +54,6 @@ class ClickMe(Dataset):
         super().__init__()
 
         self.image_folder = image_folder
-        self.csv_path = csv_path
         self.label_to_category_map = label_to_category_map
         self.is_training = is_training
         self.data = []
@@ -75,29 +76,11 @@ class ClickMe(Dataset):
             os.makedirs(image_output_dir, exist_ok=True)
             os.makedirs(output_dir, exist_ok=True)
 
-            processed_maps, num_maps = process_clickmaps(co3d_clickme, is_training=is_training)
-            gaussian_kernel = utils.gaussian_kernel(size=BRUSH_SIZE, sigma=BRUSH_SIZE_SIGMA)
-            for idx, (image, maps) in enumerate(processed_maps.items()):
-                full_path = os.path.join(image_path, image)
-                image_name, image, heatmap = make_heatmap(os.path.join(image_path, image), maps, gaussian_kernel, image_shape=image_shape, exponential_decay=exponential_decay)
-                # print(f"image_name: {image_name}")
-                label = image_name.split("/")[2]
-                # Create label to category and category to label dictionaries
-                if label not in self.label_to_category_map.keys():
-                    self.label_to_category_map[label] = category_index
-                    category_index += 1
-                if image_name is None:
-                    continue
-                # img_heatmaps[image_name] = {"image":image, "heatmap":heatmap}
-                image_name = "_".join(image_name.split("/")[-2:])
-                self.data_dictionary[image_name] = {"image":full_path, "heatmap":heatmap, "category_label":self.label_to_category_map[label]}
-                # print("1 image_name: ", image_name)
-
-            print("Done processing training images WITH ClickMaps.")
-
             # TODO: Change recursive "projects"
             text_file = "/cifs/data/tserre_lrs/projects/projects/prj_video_imagenet/CausalVisionModeling/data_lists/filtered_binocular_renders_test.txt"
             root_dir = "/cifs/data/tserre_lrs/projects/projects/prj_video_imagenet/PeRFception/data/co3d_v2/"
+            # text_file = "/media/data_cifs/projects/prj_video_imagenet/CausalVisionModeling/data_lists/filtered_binocular_renders_test.txt"
+            # root_dir = "/media/data_cifs/projects/projects/prj_video_imagenet/PeRFception/data/co3d_v2/"
 
             with open(text_file, 'r') as file:
                 lines = file.readlines()
@@ -106,27 +89,54 @@ class ClickMe(Dataset):
                     label = parts[1]
                     path = '/'.join(parts[0:3]) + '/' + parts[3]
                     files = parts[4].split()
+                    # Create label to category and category to label dictionaries
+                    if label not in self.label_to_category_map.keys():
+                        self.label_to_category_map[label] = category_index
+                        category_index += 1
 
-                    for i in range(0,50,9):
+                    for i in range(0,50, 9):
                         full_path = os.path.join(root_dir, path, files[i].strip())
                         # print(f"2 full_path: {full_path}")
                         image_name = "_".join(full_path.split("/")[-4:])
                         label = full_path.split("/")[-4]
                         # print(f"2 image_name: {image_name}")
 
-                        if image_name in self.data_dictionary.keys():
-                            self.data.append({
-                                'image': self.data_dictionary[image_name]['image'],
-                                'heatmap': self.data_dictionary[image_name]['heatmap'],
-                                'category_label': self.data_dictionary[image_name]['category_label']
-                            })
-                        else:
-                            self.data.append({
-                                'image': full_path,
-                                'heatmap': np.array([]),
-                                'category_label': self.label_to_category_map[label]
-                            })
+                        # print("ImageName: ", image_name, list(self.data_dictionary.keys())[0])
+
+                        
+                        self.data.append({
+                            'image': full_path,
+                            'heatmap': torch.from_numpy(np.zeros((256, 256))).float(),
+                            'category_label': self.label_to_category_map[label],
+                            'has_heatmap': False,
+                        })
             print("Done processing training images WITHOUT ClickMaps.")
+
+            # if image_name in self.data_dictionary.keys():
+            #     self.data.append({
+            #         'image': self.data_dictionary[image_name]['image'],
+            #         'heatmap': self.data_dictionary[image_name]['heatmap'],
+            #         'category_label': self.data_dictionary[image_name]['category_label']
+            #     })
+
+            processed_maps, num_maps = process_clickmaps(co3d_clickme, is_training=is_training)
+            gaussian_kernel = utils.gaussian_kernel(size=BRUSH_SIZE, sigma=BRUSH_SIZE_SIGMA)
+            heatmap_count = 0
+            for idx, (image, maps) in enumerate(processed_maps.items()):
+                full_path = os.path.join(image_path, image)
+                image_name, image, heatmap = make_heatmap(os.path.join(image_path, image), maps, gaussian_kernel, image_shape=image_shape, exponential_decay=exponential_decay)
+                # print(f"image_name: {image_name}")
+                label = image_name.split("/")[2]
+                if image_name is None:
+                    continue
+                # img_heatmaps[image_name] = {"image":image, "heatmap":heatmap}
+                image_name = "_".join(image_name.split("/")[-2:])
+                self.data.append({"image":full_path, "heatmap":heatmap, "category_label":self.label_to_category_map[label], "has_heatmap":True})
+                # print("1 image_name: ", image_name)
+                heatmap_count += 1
+
+            print("Done processing training images WITH ClickMaps. There are ", heatmap_count, "heatmaps.")
+            # else:
 
         else:
             image_path = "data/CO3D_ClickMe_Validation/"
@@ -161,7 +171,7 @@ class ClickMe(Dataset):
                     continue
                 # img_heatmaps[image_name] = {"image":image, "heatmap":heatmap}
                 image_name = "_".join(image_name.split("/")[-2:])
-                self.data.append({"image": full_path, "heatmap":heatmap, "category_label":self.label_to_category_map[label]})
+                self.data.append({"image": full_path, "heatmap":heatmap, "category_label":self.label_to_category_map[label], "has_heatmap":True})
 
 
     def __getitem__(self, index):
@@ -189,9 +199,10 @@ class ClickMe(Dataset):
 
         img = self._preprocess_image(img)
 
-        if not len(hmp) == 0:
-            hmp = tvF.center_crop(hmp, center_crop)
-            hmp = self._preprocess_heatmap(hmp)
+        # if not len(hmp) == 0:
+        # hmp = Image.fromarray(hmp)
+        hmp = tvF.center_crop(hmp, center_crop)
+        hmp = self._preprocess_heatmap(hmp)
         label = self._preprocess_label(label)
 
         if self.is_training:
@@ -237,6 +248,7 @@ class ClickMe(Dataset):
         Returns:
             torch.Tensor: The preprocessed heatmap tensor.
         """
+        hmp = torch.tensor(hmp)
         return hmp.to(torch.float32) / 255.0
 
     def _preprocess_label(self, label):
@@ -264,11 +276,196 @@ class ClickMe(Dataset):
             tuple: A tuple containing the augmented image and heatmap tensors.
         """
         # Add an extra dimension to hmp to make it 3D
-        if not len(hmp) == 0:
-            hmp = hmp.unsqueeze(0)
-        
-            stacked_img = torch.cat((img, hmp), dim=0)
-            stacked_img = data_transforms['aug'](stacked_img)
-            return stacked_img[:-1, :, :], stacked_img[-1, :, :]  # Remove the extra dimension from hmp
+        # if has_heatmap:
+        hmp = hmp.unsqueeze(0)
+    
+        stacked_img = torch.cat((img, hmp), dim=0)
+        stacked_img = data_transforms['aug'](stacked_img)
+        return stacked_img[:-1, :, :], stacked_img[-1, :, :]  # Remove the extra dimension from hmp
+        # else:
+        #     return data_transforms['aug'](img), np.array([])
+    
+def build_co3d_eval_loader(args, transform=None, return_all=False, label_to_index_map=None):
+    cifs = "/cifs/data/tserre_lrs/projects/prj_video_imagenet/"
+    if not os.path.exists(cifs):
+        cifs = "/cifs/data/tserre_lrs/projects/projects/prj_video_imagenet/"
+    TRAIN_LIST_PATH = 'data_lists/filtered_binocular_renders_train.txt'
+    DATA_ROOT = os.path.join(cifs, 'PeRFception/data/co3d_v2/binocular_trajectory/')
+    DATA_PATH = os.path.join(cifs, 'Evaluation/')
+    TEST_DATA_PATH = './assets/co3d_clickmaps_normalized.npy'
+    TEST_HUMAN_RESULTS = './assets/human_ceiling_results.npz'
+    label_to_index_map = label_to_index_map
+    
+    # transform_train = transforms.Compose([
+    #     transforms.RandomResizedCrop(224, interpolation=3),
+    #     transforms.RandomHorizontalFlip(),
+    #     transforms.ToTensor(),
+    #     transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])])
+    if transform is None:
+        transform = transforms.Compose([
+            transforms.Resize(256, interpolation=3),
+            transforms.CenterCrop(224),
+            transforms.ToTensor(),
+            # transforms.Normalize(mean=args.mean, std=args.std)])
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])])
+
+
+    co3d_dataset_test = Co3dTestDataset(numpy_file=TEST_DATA_PATH, human_results_file=TEST_HUMAN_RESULTS, label_to_index=label_to_index_map, transform=transform)
+    co3d_dataloader_test = DataLoader(co3d_dataset_test, batch_size=1, num_workers=args.num_workers, shuffle=False)
+    
+    if return_all:
+        co3d_dataset_train = Co3dLpDataset(root=DATA_ROOT,
+                train = True,
+                transform=transform,
+                datapath = os.path.join(DATA_PATH,"filtered_co3d_train.txt"),
+                train_start_frame=0,
+                train_end_frame=40,
+                val_start_frame=41, 
+                val_end_frame=49)
+        co3d_dataset_val = Co3dLpDataset(root=DATA_ROOT,
+                train = False,
+                transform=transform,
+                datapath = os.path.join(DATA_PATH, "filtered_co3d_test.txt"),
+                train_start_frame=0,
+                train_end_frame=40,
+                val_start_frame=41, 
+                val_end_frame=49)
+        co3d_dataloader_train = DataLoader(co3d_dataset_train, batch_size=256, shuffle=False, num_workers=args.num_workers)
+        co3d_dataloader_val = DataLoader(co3d_dataset_val, batch_size=256, shuffle=False, num_workers=args.num_workers)
+        return co3d_dataloader_train, co3d_dataloader_val, co3d_dataloader_test
+    return co3d_dataloader_test
+
+from sklearn import preprocessing
+
+class Co3dLpDataset(torch.utils.data.Dataset):
+    def __init__(self,
+                 root,
+                 train=True,
+                 datapath="",
+                 transform=None,
+                 lazy_init=False,
+                 reverse_sequence=False,
+                 train_start_frame = 0,
+                 train_end_frame = 39,
+                 val_start_frame = 40,
+                 val_end_frame = 49):
+
+        super(Co3dLpDataset, self).__init__()
+        self.root = root
+        self.train = train
+        self.datapath = datapath,
+        self.transform = transform
+        self.lazy_init = lazy_init
+        self.reverse_sequence = reverse_sequence
+        self.train_start_frame = train_start_frame
+        self.train_end_frame = train_end_frame
+        self.val_start_frame = val_start_frame
+        self.val_end_frame = val_end_frame
+
+        if not self.lazy_init:
+            self.clips = self.make_dataset_samples()
+            if len(self.clips) == 0:
+                raise(RuntimeError("Found 0 video clips in subfolders of: " + root + "\n"
+                                   "Check your data directory (opt.data-dir)."))
+
+        # Preprocessing the label
+        all_classes = os.listdir(self.root)
+        self.label_preprocessing = preprocessing.LabelEncoder()
+        self.label_preprocessing.fit(np.array(all_classes))
+
+    def __getitem__(self, index):
+        sample = self.clips[index%len(self.clips)]
+        image = self.load_frame(sample)
+
+        # Adding the labels
+        label = sample[0].split('/')[0]
+        label = self.label_preprocessing.transform([label])
+
+        label = torch.tensor(label)
+
+        if self.transform:
+            image = self.transform(image)
+
+        return image, label[0]
+
+    def __len__(self):
+        return len(self.clips)
+
+    def load_frame(self, sample):
+        fname = os.path.join(self.root, sample[0])
+        frames_list = sample[1:]
+
+        if not (os.path.exists(fname)):
+            print(f"Frame of {fname} does not exist")
+            return []
+
+        # Train on only training frames
+        if self.train:
+            frames_list = frames_list[self.train_start_frame: self.train_end_frame]
+
+        # Validate on remaining frames
         else:
-            return data_transforms['aug'](img), np.array([])
+            frames_list = frames_list[self.val_start_frame: self.val_end_frame]
+
+        selected_random_frame = random.choice(frames_list)
+
+        img = Image.open(os.path.join(fname, selected_random_frame)).convert('RGB')  # Open the image
+
+        return img
+
+    def make_dataset_samples(self):
+        self.datapath = self.datapath[0]
+        with open(self.datapath, 'r') as fopen:
+            lines = fopen.readlines()
+        all_seqs = [line.split() for line in lines]
+        return all_seqs
+
+class EmbeddingDataset(Dataset):
+    def __init__(self, embeddings, labels):
+        self.embeddings = embeddings
+        self.labels = labels
+
+    def __len__(self):
+        return len(self.labels)
+
+    def __getitem__(self, idx):
+        return self.embeddings[idx], self.labels[idx]
+
+class Co3dTestDataset(Dataset):
+    def __init__(self, numpy_file, human_results_file, label_to_index, transform=None):
+        super(Co3dTestDataset, self).__init__()
+        self.image_names = []
+        self.image_files = []
+        self.heatmaps = []
+        self.categories = []
+        self.transform = transform
+        self.label_to_index = label_to_index
+        all_data = np.load(numpy_file, allow_pickle=True)
+        human_data = np.load(human_results_file, allow_pickle=True)
+        # Weird indexing because I didn't save the dictionary right
+        all_data = all_data[None][0]
+        filtered_imgs = human_data['final_clickmaps_thresholded'].tolist().keys()
+        for image_name in all_data.keys():
+            cat = image_name.split('_')[0]
+            if image_name.replace(f'{cat}_', f'{cat}/') in filtered_imgs:
+                self.image_files.append(all_data[image_name]['image'])
+                self.heatmaps.append(all_data[image_name]['heatmap'])
+                self.image_names.append(image_name)
+                self.categories.append(cat)
+
+    def __len__(self):
+        return len(self.image_files)
+
+    def __getitem__(self, idx):
+        img_file = self.image_files[idx]
+        img_label = self.image_names[idx].split('_')[0]
+        img_name = self.image_names[idx]
+        numeric_label = torch.tensor(self.label_to_index[img_label], dtype=torch.long)
+        heatmap = self.heatmaps[idx]
+        if self.transform:
+            image = self.transform(img_file)
+        else:
+            image = img_file
+        # print("Test:", image.shape)
+        cat = self.categories[idx]
+        return image, heatmap, numeric_label, img_name, cat
