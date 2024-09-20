@@ -20,6 +20,7 @@ import torch.nn.functional as F
 import os
 from typing import Iterable
 import pretrainingmodels
+from loss import pyramidal_mse
 
 N_CO3D_CLASSES = 51
 BRUSH_SIZE = 11
@@ -37,6 +38,7 @@ def parse_args():
     parser.add_argument("--num_epochs", type=int, default=10, help="Number of epochs to train")
     parser.add_argument("--num_workers", type=int, default=8, help="Number of workers in the system")
     parser.add_argument("--learning_rate", type=float, default=1e-4, help="Learning rate for optimizer")
+    parser.add_argument("--harmonization_lambda", type=float, default=1.0, help="Lambda for harmonization loss")
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu",
                         help="Device to use for training (cuda/cpu)")
     parser.add_argument("--output_model", type=str, default="trained_vit_clickme.pth",
@@ -81,6 +83,8 @@ def main(args):
         return_features=True,
         num_frames = 4
     )
+    p_model.encoder = model
+    p_model= p_model.to(device)
     model.heads = nn.Linear(model.embed_dim, N_CO3D_CLASSES)
 
     linear_model = LinearModel(p_model.encoder.embed_dim, 51)
@@ -94,7 +98,7 @@ def main(args):
 
     gaussian_kernel = utils.gaussian_kernel(size=BRUSH_SIZE, sigma=BRUSH_SIZE_SIGMA).to(device)
 
-    print(f"Image 1 of Training Set: {train_dataset[0][0].shape}")
+    print(f"  1 of Training Set: {train_dataset[0][0].shape}")
     print(f"Image 1 of Validation Set: {val_dataset[0][0].shape}")
 
     image_with_heatmap_count = 0
@@ -106,80 +110,56 @@ def main(args):
     for epoch in range(args.num_epochs):
         model.train()
         train_loss = 0.0
+        total_loss = 0.0
         total_cce_loss = 0.0
         total_harmonization_loss = 0.0
         train_acc = 0.0
         train_correct = 0
         total_samples = 0
-
-        batch_count = 0
+        pyramid_levels = 5
 
         for batch in tqdm(train_loader, desc=f"Training Epoch {epoch+1}/{args.num_epochs}"):
-            # print(f"Batch: {batch}")
+            batch_harmonization_loss = 0.0
+
             images, heatmaps, targets, has_heatmap_batch = batch[0], batch[1], batch[2], batch[3]
             images, heatmaps, targets = images.to(device), heatmaps.to(device), targets.to(device)
-
-            # image_count = 0
-            # heatmap_count = 0
-            # for i, h, t, hh in zip(images, heatmaps, targets, has_heatmap_batch):
-            #     if hh:
-            #         heatmap_count += 1
-            #         print(f"Image {image_count} has heatmap")
-            #     image_count += 1
-            # # print(f"Batch {batch_count} has {image_count} images, {heatmap_count} heatmaps")
-            # batch_count += 1
 
             images.requires_grad = True
 
             optimizer.zero_grad()
 
             with torch.backends.cuda.sdp_kernel(enable_flash=False, enable_math=True, enable_mem_efficient=False):
+                torch.autograd.set_detect_anomaly(True)
                 y_pred = model(images) 
                 most_probable_class = torch.argmax(y_pred, dim=-1)  # Get index of the most probable class for each image
                 # Scores of the most probable class for each image
                 most_probable_scores = y_pred[torch.arange(y_pred.size(0)), most_probable_class]  # Shape: (batch_size,)
-                saliency_map = torch.autograd.grad(outputs=most_probable_scores, inputs=images,
+                saliency_maps = torch.autograd.grad(outputs=most_probable_scores, inputs=images,
                                                 grad_outputs=torch.ones_like(most_probable_scores),
                                                 create_graph=True)[0]
-                saliency_map = saliency_map.mean(dim=1)  # Averaging across the channels to get shape: (batch_size, height, width)
+                saliency_maps = saliency_maps.mean(dim=1)  # Averaging across the channels to get shape: (batch_size, height, width)
                         
-                heatmap = utils.gaussian_blur(heatmaps.unsqueeze(1), gaussian_kernel).unsqueeze(1)
-                saliency_map = utils.gaussian_blur(saliency_map.unsqueeze(1), gaussian_kernel).unsqueeze(1)
+                heatmaps = utils.gaussian_blur(heatmaps.unsqueeze(1), gaussian_kernel).unsqueeze(1)
+                saliency_maps = utils.gaussian_blur(saliency_maps.unsqueeze(1), gaussian_kernel).unsqueeze(1)
 
-                # harmonization_loss, _ = harmonizer_loss(y_pred, targets, heatmap, saliency_map)
-
-
-                heatmap_count = 0 + 1e-6
-                # total_cce_loss = 0.0
-                # total_harmonization_loss = 0.0
-                # for image, heatmap, target, predicted_label, has_heatmap, most_probable_score in zip(images, heatmaps, targets, y_pred, has_heatmap_batch, most_probable_scores):            
-                #     if has_heatmap:
-                #         heatmap_count += 1
-                #         saliency_map = torch.autograd.grad(outputs=most_probable_score, inputs=image,
-                #                                 grad_outputs=torch.ones_like(most_probable_score),
-                #                                 create_graph=True)[0]
-                #         saliency_map = saliency_map.mean(dim=1)  # Averaging across the channels to get shape: (batch_size, height, width)
-                        
-                #         heatmap = utils.gaussian_blur(heatmaps.unsqueeze(1), gaussian_kernel).unsqueeze(1)
-                #         saliency_map = utils.gaussian_blur(saliency_map.unsqueeze(1), gaussian_kernel).unsqueeze(1)
-
-                #         harmonization_loss, _ = harmonizer_loss(predicted_label, target, heatmap, saliency_map)
-                # total_harmonization_loss += harmonization_loss
+                heatmap_count = 0.0
+                for (heatmap, saliency_map, has_heatmap) in zip(heatmaps, saliency_maps, has_heatmap_batch):
+                    if has_heatmap:
+                        batch_harmonization_loss = batch_harmonization_loss + torch.mean(torch.stack([torch.mean(torch.square(saliency_map - heatmap)) for _ in range(pyramid_levels)]))
+                        heatmap_count = heatmap_count + 1.0
+                if heatmap_count > 0.0:
+                    total_harmonization_loss = args.harmonization_lambda * (batch_harmonization_loss/heatmap_count)
                 total_cce_loss = nn.CrossEntropyLoss()(y_pred, targets)
+                total_cce_loss = total_cce_loss/len(images)
+                total_loss = total_harmonization_loss# + total_cce_loss
 
-                # print(f"Calculated number of heatmaps: {heatmap_count} for {len(images)} images")  
-
-                total_loss = total_cce_loss/len(images)
-                # if heatmap_count > 0:
-                # total_loss += total_harmonization_loss/heatmap_count
-
-                total_loss.backward()
+                total_loss.backward(retain_graph=True)
 
                 optimizer.step()
 
             train_loss += total_loss.item()
             total_cce_loss += total_cce_loss.item()
-            # total_harmonization_loss += total_harmonization_loss.item()
+            total_harmonization_loss += total_harmonization_loss.item()
             train_correct += (torch.argmax(y_pred, dim=1) == targets).sum().item()
             total_samples += targets.size(0)
     
@@ -187,10 +167,8 @@ def main(args):
          
         print(f"Epoch [{epoch+1}/{args.num_epochs}], Train Loss: {train_loss/len(train_loader):.4f}, Train Acc: {train_acc:.4f}")
         wandb.log({"train_loss": train_loss/len(train_loader), "train_acc": train_acc, "cce_loss": total_cce_loss, "harmonization_loss": total_harmonization_loss})
-        # eval_alignment(model, val_loader, device, epoch, None, list(range(10)), args)
-        eval_co3d(p_model, co3d_train_dataloader, co3d_val_dataloader, co3d_test_dataloader, device, epoch,
-                30, 256, 5e-4, None, start_steps=0, num_workers=8, args=args)
-            #   f"Val Loss: {val_loss/len(val_loader):.4f}")
+        # TODO: Add arguments for the following function
+        eval_co3d(p_model, co3d_train_dataloader, co3d_val_dataloader, co3d_test_dataloader, device, epoch,30, 256, 5e-4, None, start_steps=0, num_workers=8, args=args)
 
     print(f"Training completed. Model saved to {args.output_model}")
 
@@ -203,7 +181,7 @@ def extract_features(model: torch.nn.Module, data_loader: Iterable, device: torc
         with torch.no_grad():
             images, labels = data
             images = images.to(device)
-            preds = model(images, f2d=True)
+            preds = model(images)#, f2d=True)
             if len(preds.shape) > 2:
                 preds = torch.mean(preds, dim=1)
             features.append(preds.cpu())
@@ -232,7 +210,7 @@ class FullModel(nn.Module):
         self.encoder = encoder
 
     def forward(self, x):
-        x = self.encoder(x, f2d=True)
+        x = self.encoder(x)#, f2d=True)
         if len(x.shape) > 2:
             x = x.mean(dim=1)
         return self.head(x)
@@ -316,9 +294,9 @@ def eval_alignment(full_model:torch.nn.Module, test_data_loader: Iterable,
     sample_imgs = []
     sample_maps = []
     sample_clickmaps = []
-    with open(args.medians_json, 'r') as f:
+    with open('./assets/click_medians.json', 'r') as f:
         medians = json.load(f)
-    with open(args.alignments_json, 'r') as f:
+    with open('./assets/alignments.json', 'r') as f:
         alignments = json.load(f)
     criterion = nn.CrossEntropyLoss()
     #TODO Use model with best val acc for alignment and test
@@ -346,7 +324,7 @@ def eval_alignment(full_model:torch.nn.Module, test_data_loader: Iterable,
         if len(visualize)>0 and i in visualize:
             img = imgs.clone().detach().cpu().numpy().squeeze()
             img = np.moveaxis(img, 0, -1)
-            img = img*args.std + args.mean
+            # img = img*args.std + args.mean
             img = np.uint8(255*img)
         imgs.requires_grad = True
         outputs = full_model(imgs)
@@ -415,7 +393,7 @@ def eval_alignment(full_model:torch.nn.Module, test_data_loader: Iterable,
         category_alignments[cat] = {"alignment": category_alignments[cat], "null": category_nulls[cat]}
     category_alignments['human'] = {"alignment": topk_score, "null": null_score}
     category_json = json.dumps(category_alignments, indent=4)
-    with open(os.path.join(args.output_dir, f'cat_alignment_{str(epoch).zfill(3)}.json'), 'w') as f:
+    with open(os.path.join("./outs", f'cat_alignment_{str(epoch).zfill(3)}.json'), 'w') as f:
         f.write(category_json)
     avg_test_acc = sum(all_test_acc)/float(len(all_test_acc))
     if log_writer is not None:
@@ -454,3 +432,47 @@ if __name__ == "__main__":
             # harmonization_loss, cce_loss = harmonizer_loss(y_pred, targets, heatmaps, saliency_maps)
             # total_loss = harmonization_loss + cce_loss
             # total_loss.backward()
+
+
+# # Drew's Implementation
+# with torch.backends.cuda.sdp_kernel(enable_flash=False, enable_math=True, enable_mem_efficient=False):
+#     torch.autograd.set_detect_anomaly(True)
+#     # X_i is the image at index i
+#     logits = model(X_i) 
+
+#     # 1. a)  j is the index of the argmax categorical logit (not softmax prob)
+#     j = torch.argmax(logits, dim=-1)
+#     most_probable_scores = logits[torch.arange(logits.size(0)), j] # Scores of the most probable class for each image. Shape: (batch_size,)
+
+#     # 1. b) Compute G_i = dY_j/dX_i
+#     G_i = torch.autograd.grad(outputs=most_probable_scores, inputs=X_i, grad_outputs=torch.ones_like(most_probable_scores), create_graph=True)[0]
+
+#     # 2. Take the max of absolute values over channels to give yourself a HxW matrix. Let's call this H_i
+#     G_i = torch.abs(G_i)
+#     H_i = G_i.mean(dim=1)  # Averaging across the channels to get shape: (height, width)
+
+#     # 3. Resize H_i to the size of the clickmap for X_i. Let's call this C_i
+#     C_i = F.interpolate(H_i.unsqueeze(0), size=clickmap[i].size, mode="bilinear").to(torch.float32)
+
+#     # 4. Count up the number of pixels K in the ClickMe map that have >0 probability of being clicked
+#     K = torch.sum(clickmap[i] > 0)
+
+#     # 5. Sort H_i in descending order and figure out the value at position K. Let's call this value T_i. Set values in H_i <= T_i to be 0
+#     T_i = torch.topk(H_i.flatten(), K).values[-1]
+#     H_i[H_i < T_i] = 0
+
+#     # 6. Compute the Spearman correlation between C_i and H_i
+#     spearman_corr, _ = spearmanr(C_i.flatten(), H_i.flatten())
+#     alignment_score = spearman_corr / HUMAN_SPEARMAN_CEILING
+
+#     # 
+#     heatmaps = utils.gaussian_blur(heatmaps.unsqueeze(1), gaussian_kernel).unsqueeze(1)
+#     saliency_maps = utils.gaussian_blur(saliency_maps.unsqueeze(1), gaussian_kernel).unsqueeze(1)
+
+#     heatmap_count = 0.0
+#     for (heatmap, saliency_map, has_heatmap) in zip(heatmaps, saliency_maps, has_heatmap_batch):
+#         if has_heatmap:
+#             batch_harmonization_loss = batch_harmonization_loss + torch.mean(torch.stack([torch.mean(torch.square(saliency_map - heatmap)) for _ in range(pyramid_levels)]))
+#             heatmap_count = heatmap_count + 1.0
+#     if heatmap_count > 0.0:
+#         total_harmonization_loss = args.harmonization_lambda * (batch_harmonization_loss/heatmap_count)
