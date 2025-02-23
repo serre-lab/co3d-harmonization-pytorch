@@ -18,11 +18,13 @@ from clickme import process_clickmaps, make_heatmap
 import wandb    
 from torchvision.utils import save_image
 
-
+###### CONFIG ######
+wandb_logging = True
 N_CO3D_CLASSES = 51
 BRUSH_SIZE = 11
 BRUSH_SIZE_SIGMA = np.sqrt(BRUSH_SIZE)
 HUMAN_SPEARMAN_CEILING = 0.4422303328731989
+
 
 
 def save_debug_images(saliency_pyramid, clickmap_pyramid, levels=[0, 1], num_samples=4):
@@ -158,7 +160,7 @@ class ClickMe(Dataset):
                 image_name, image_obj, heatmap = make_heatmap(
                     os.path.join(image_path, image), maps, gaussian_kernel,
                     image_shape=image_shape, exponential_decay=exponential_decay)
-                label = image_name.split("/")[2]
+                label = image_name.split("/")[-2]
                 if label not in self.label_to_category_map.keys():
                     self.label_to_category_map[label] = category_index
                     category_index += 1
@@ -249,7 +251,7 @@ def CE(q, k):
     k = F.softmax(k.reshape(len(k), -1), dim=-1)
     return F.cross_entropy(q, k, reduction='none')
 
-def compute_harmonization_loss(images, outputs, labels, clickmaps, has_heatmap, pyramid_levels=5, metric=MSE):
+def compute_harmonization_loss(images, outputs, labels, clickmaps, has_heatmap, pyramid_levels=5, metric=CE):
     """
     Computes the harmonization loss from Fel's paper
 
@@ -292,20 +294,19 @@ def compute_harmonization_loss(images, outputs, labels, clickmaps, has_heatmap, 
     saliency_pyramid = build_gaussian_pyramid(valid_saliency, levels=pyramid_levels)
     clickmap_pyramid = build_gaussian_pyramid(clickmaps, levels=pyramid_levels)
 
-    has_heatmap_tensor = torch.tensor(has_heatmap, dtype=torch.int, device=device)
-    heatmap_count = torch.sum(has_heatmap_tensor)
+    heatmap_count = torch.sum(has_heatmap_bool)
     # 7. Compute MSE across pyramid levels
     loss_levels = []
     for level_idx in range(pyramid_levels):
         level_differences = metric(saliency_pyramid[level_idx], clickmap_pyramid[level_idx])
-        level_loss = torch.sum(level_differences * has_heatmap_tensor)/heatmap_count
+        level_loss = torch.sum(level_differences * has_heatmap_bool)/heatmap_count
 
         loss_levels.append(level_loss)
         # Debug: Save sample images from a couple of pyramid levels
         # save_debug_images(saliency_pyramid, clickmap_pyramid, levels=[0, 1], num_samples=4)
     
     # Average across levels
-    harmonization_loss = 1e7 * torch.mean(torch.tensor(loss_levels))
+    harmonization_loss = torch.mean(torch.tensor(loss_levels))
 
     return harmonization_loss
 
@@ -315,7 +316,7 @@ def compute_harmonization_loss(images, outputs, labels, clickmaps, has_heatmap, 
 def train_one_epoch(model, dataloader, optimizer, device, epoch):
     model.train()
     criterion = nn.CrossEntropyLoss()
-    lambda1 = 1.0  # Harmonization loss weight
+    lambda1 = 1e7  # Harmonization loss weight
     pyramid_levels = 5
     running_loss = 0.0
     for batch_idx, batch in enumerate(dataloader):
@@ -328,7 +329,7 @@ def train_one_epoch(model, dataloader, optimizer, device, epoch):
         optimizer.zero_grad()
 
         with torch.backends.cuda.sdp_kernel(enable_flash=False, enable_math=True, enable_mem_efficient=False):
-            torch.autograd.set_detect_anomaly(True)
+            # torch.autograd.set_detect_anomaly(True)
             outputs = model(images)
         ce_loss = criterion(outputs, labels)
         # Harmonization loss 
@@ -362,32 +363,31 @@ def validate(model, dataloader, device, pyramid_levels=5):
 
     criterion = nn.CrossEntropyLoss()
 
-    with torch.no_grad():
-        for batch in dataloader:
-            images, clickmaps, labels, has_heatmap = batch
-            has_heatmap = list(has_heatmap)
-            images = images.to(device)
-            labels = labels.to(device)
-            clickmaps = torch.stack(clickmaps)
-            images.requires_grad_()
+    for batch in dataloader:
+        images, clickmaps, labels, has_heatmap = batch
+        has_heatmap = list(has_heatmap)
+        images = images.to(device)
+        labels = labels.to(device)
+        clickmaps = torch.stack(clickmaps)
+        images.requires_grad_()
 
-            outputs = model(images)
+        outputs = model(images)
 
-            loss = criterion(outputs, labels)
-            total_loss += loss.item()
+        loss = criterion(outputs, labels)
+        total_loss += loss.item()
 
-            for i in range(images.shape[0]):
-                if has_heatmap[i]:
-                    output = outputs[i:i+1]
-                    label = labels[i:i+1]
-                    one_hot = torch.zeros_like(output)
-                    one_hot[0, label] = 1.0
-                    with torch.backends.cuda.sdp_kernel(enable_flash=False, enable_math=True, enable_mem_efficient=False):
-                        torch.autograd.set_detect_anomaly(True)
-                        grad = torch.autograd.grad(outputs=output, inputs=images[i:i+1], grad_outputs=one_hot, retain_graph=True)[0]
-                    saliency = grad.abs().mean(dim=1, keepdim=True)
-                    alignment = compute_spearman_correlation(saliency, clickmaps[i].to(device))
-                    alignment_scores.append(alignment)
+        for i in range(images.shape[0]):
+            if has_heatmap[i]:
+                output = outputs[i:i+1]
+                label = labels[i:i+1]
+                one_hot = torch.zeros_like(output)
+                one_hot[0, label] = 1.0
+                with torch.backends.cuda.sdp_kernel(enable_flash=False, enable_math=True, enable_mem_efficient=False):
+                    torch.autograd.set_detect_anomaly(True)
+                    grad = torch.autograd.grad(outputs=output, inputs=images[i:i+1], grad_outputs=one_hot, retain_graph=True)[0]
+                saliency = grad.abs().mean(dim=1, keepdim=True)
+                alignment = compute_spearman_correlation(saliency, clickmaps[i].to(device))
+                alignment_scores.append(alignment)
 
     avg_loss = total_loss / len(dataloader)
     avg_alignment = sum(alignment_scores) / len(alignment_scores) if alignment_scores else 0.0
@@ -411,10 +411,8 @@ def main():
     parser.add_argument('--val-folder', type=str, default="data/CO3D_ClickMe_Validation/", help='validation image folder')
     args = parser.parse_args()
 
-    wandb_logging = False
-
     if wandb_logging:
-        wandb.init(entity="jayrgopal", project="harmonization",
+        wandb.init(entity="serrelab", project="harmonization",
         config={
         "epochs": args.epochs,
         "batch_size": args.batch_size,
@@ -437,7 +435,8 @@ def main():
     model = timm.create_model('vit_small_patch16_224', pretrained=False, num_classes=N_CO3D_CLASSES)
     model = nn.DataParallel(model).to(device)
 
-    optimizer = optim.SGD(model.parameters(), lr=args.lr, momentum=0.9)
+    #optimizer = optim.SGD(model.parameters(), lr=args.lr, momentum=0.9)
+    optimizer = optim.Adam(model.parameters(), lr=args.lr)
 
     for epoch in range(1, args.epochs + 1):
         print(f"Starting Epoch {epoch}")
