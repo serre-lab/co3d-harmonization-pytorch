@@ -16,12 +16,29 @@ import ipdb
 from scipy.stats import spearmanr
 from clickme import process_clickmaps, make_heatmap
 import wandb    
+from torchvision.utils import save_image
 
 
 N_CO3D_CLASSES = 51
 BRUSH_SIZE = 11
 BRUSH_SIZE_SIGMA = np.sqrt(BRUSH_SIZE)
 HUMAN_SPEARMAN_CEILING = 0.4422303328731989
+
+
+def save_debug_images(saliency_pyramid, clickmap_pyramid, levels=[0, 1], num_samples=4):
+    """
+    Saves sample images from the saliency and clickmap pyramids for debugging.
+    
+    Args:
+        saliency_pyramid: list of tensors, each of shape [B, 1, H, W]
+        clickmap_pyramid: list of tensors, each of shape [B, 1, H, W]
+        levels: list of pyramid levels to save (default: levels 0 and 1)
+        num_samples: number of samples from the batch to save from each level
+    """
+    for level in levels:
+        # Save a grid of the first num_samples images
+        save_image(clickmap_pyramid[level][:num_samples], f"debug_clickmap_level{level}.png", normalize=True)
+        save_image(saliency_pyramid[level][:num_samples], f"debug_model_map_level{level}.png", normalize=True)
 
 
 def get_gaussian_kernel(kernel_size=BRUSH_SIZE, sigma=BRUSH_SIZE_SIGMA, channels=1):
@@ -284,9 +301,11 @@ def compute_harmonization_loss(images, outputs, labels, clickmaps, has_heatmap, 
         level_loss = torch.sum(level_differences * has_heatmap_tensor)/heatmap_count
 
         loss_levels.append(level_loss)
+        # Debug: Save sample images from a couple of pyramid levels
+        # save_debug_images(saliency_pyramid, clickmap_pyramid, levels=[0, 1], num_samples=4)
     
     # Average across levels
-    harmonization_loss = torch.mean(torch.tensor(loss_levels))
+    harmonization_loss = 1e7 * torch.mean(torch.tensor(loss_levels))
 
     return harmonization_loss
 
