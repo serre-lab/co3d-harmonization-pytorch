@@ -15,12 +15,8 @@ import timm
 import ipdb
 from scipy.stats import spearmanr
 from clickme import process_clickmaps, make_heatmap
-# Add wandb logging
 import wandb    
-wandb_logging = False
 
-if wandb_logging:
-    wandb.init(entity="JayRGopal", project="co3d-harmonization")
 
 N_CO3D_CLASSES = 51
 BRUSH_SIZE = 11
@@ -69,7 +65,7 @@ class ClickMe(Dataset):
         self.data_dictionary = {}
 
         if is_training:
-            image_path = "../CO3D_ClickMe_Training2/"
+            image_path = "/cifs/data/tserre_lrs/projects/projects/prj_video_imagenet/CO3D_ClickMe_Training/"
             co3d_clickme = pd.read_csv("data/CO3D_ClickMe_Training.csv")
             output_dir = "assets"
             image_output_dir = "clickme_test_images"
@@ -114,7 +110,7 @@ class ClickMe(Dataset):
                 image_name, image_obj, heatmap = make_heatmap(
                     os.path.join(image_path, image), maps, gaussian_kernel,
                     image_shape=image_shape, exponential_decay=exponential_decay)
-                label = image_name.split("/")[2]
+                label = image_name.split("/")[-2]
                 if image_name is None:
                     continue
                 image_name = "_".join(image_name.split("/")[-2:])
@@ -127,7 +123,7 @@ class ClickMe(Dataset):
                 heatmap_count += 1
             print("Done processing training images WITH ClickMaps. There are", heatmap_count, "heatmaps.")
         else:
-            image_path = "../CO3D_ClickMe2/"
+            image_path = "/cifs/data/tserre_lrs/projects/projects/prj_video_imagenet/CO3D_ClickMe2/"
             co3d_clickme = pd.read_csv("data/CO3D_ClickMe_Validation.csv")
             output_dir = "assets"
             image_output_dir = "clickme_test_images"
@@ -226,8 +222,17 @@ def compute_spearman_correlation(saliency, clickmap):
     correlation, _ = spearmanr(saliency_np, clickmap_np)
     return correlation
 
+def MSE(x, y):
+    x = x.reshape(len(x), -1)
+    y = y.reshape(len(y), -1)
+    return torch.square(x-y).mean(-1)
 
-def compute_harmonization_loss( images, outputs, labels, clickmaps, has_heatmap, pyramid_levels=5, metric=CE):
+def CE(q, k):
+    q = q.reshape(len(q), -1)
+    k = F.softmax(k.reshape(len(k), -1), dim=-1)
+    return F.cross_entropy(q, k, reduction='none')
+
+def compute_harmonization_loss(images, outputs, labels, clickmaps, has_heatmap, pyramid_levels=5, metric=MSE):
     """
     Computes the harmonization loss from Fel's paper
 
@@ -248,7 +253,7 @@ def compute_harmonization_loss( images, outputs, labels, clickmaps, has_heatmap,
     # If no images in this batch have a valid heatmap, skip
     if not has_heatmap_bool.any():
         return torch.tensor(0.0, device=device)
-
+    
     # 1. Create a one-hot version of the classification targets
     batch_size, num_classes = outputs.shape
     one_hot = torch.zeros_like(outputs)  # [B, num_classes]
@@ -256,7 +261,7 @@ def compute_harmonization_loss( images, outputs, labels, clickmaps, has_heatmap,
 
     # 2. Zero out one-hot entries where has_heatmap is False
     # one_hot[~has_heatmap_bool] = 1.0
-
+    
     # 3. Compute saliency by taking gradient of outputs wrt the input images
     gradients = torch.autograd.grad(
         outputs=outputs,        # [B, numm_classes]
@@ -264,36 +269,29 @@ def compute_harmonization_loss( images, outputs, labels, clickmaps, has_heatmap,
         grad_outputs=one_hot,   # [B, num_classes]
         create_graph=True 
     )[0]
-
+    
     # 4. Convert gradient to saliency
     valid_saliency = gradients.abs().amax(dim=1, keepdim=True)  # [B, 1, H, W]
     saliency_pyramid = build_gaussian_pyramid(valid_saliency, levels=pyramid_levels)
     clickmap_pyramid = build_gaussian_pyramid(clickmaps, levels=pyramid_levels)
 
-    heatmap_count = torch.sum(has_heatmap)
+    has_heatmap_tensor = torch.tensor(has_heatmap, dtype=torch.int, device=device)
+    heatmap_count = torch.sum(has_heatmap_tensor)
     # 7. Compute MSE across pyramid levels
     loss_levels = []
     for level_idx in range(pyramid_levels):
         level_differences = metric(saliency_pyramid[level_idx], clickmap_pyramid[level_idx])
-        level_loss = torch.sum(level_differences * has_heatmap)/heatmap_count
+        level_loss = torch.sum(level_differences * has_heatmap_tensor)/heatmap_count
 
         loss_levels.append(level_loss)
-
+    
     # Average across levels
-    harmonization_loss = torch.mean(loss_levels)
+    harmonization_loss = torch.mean(torch.tensor(loss_levels))
 
     return harmonization_loss
 
     # loss = torch.sum(-q * F.log_softmax(student_out[v], dim=-1), dim=-1)
-def MSE(x, y):
-    x = x.reshape(len(x), -1)
-    y = y.reshape(len(y), -1)
-    return torch.square(x-y).mean(-1)
 
-def CE(q, k):
-    q = q.reshape(len(q), -1)
-    k = F.softmax(k.reshape(len(k), -1, -1))
-    return F.cross_entropy(q, k, reduction='none')
 
 def train_one_epoch(model, dataloader, optimizer, device, epoch):
     model.train()
@@ -301,11 +299,11 @@ def train_one_epoch(model, dataloader, optimizer, device, epoch):
     lambda1 = 1.0  # Harmonization loss weight
     pyramid_levels = 5
     running_loss = 0.0
-
     for batch_idx, batch in enumerate(dataloader):
         images, clickmaps, labels, has_heatmap = batch
         images = images.to(device)
         labels = labels.to(device)
+        clickmaps = torch.stack(clickmaps)
         images.requires_grad_()
 
         optimizer.zero_grad()
@@ -314,7 +312,6 @@ def train_one_epoch(model, dataloader, optimizer, device, epoch):
             torch.autograd.set_detect_anomaly(True)
             outputs = model(images)
         ce_loss = criterion(outputs, labels)
-
         # Harmonization loss 
         harmonization_loss = compute_harmonization_loss(images=images, outputs=outputs, labels=labels, clickmaps=clickmaps, has_heatmap=has_heatmap, pyramid_levels=pyramid_levels)
 
@@ -352,6 +349,7 @@ def validate(model, dataloader, device, pyramid_levels=5):
             has_heatmap = list(has_heatmap)
             images = images.to(device)
             labels = labels.to(device)
+            clickmaps = torch.stack(clickmaps)
             images.requires_grad_()
 
             outputs = model(images)
@@ -387,12 +385,24 @@ def collate_fn(batch):
 
 def main():
     parser = argparse.ArgumentParser(description='Harmonized ViT Training with ClickMe Dataset')
-    parser.add_argument('--epochs', type=int, default=50, help='number of training epochs')
+    parser.add_argument('--epochs', type=int, default=2, help='number of training epochs')
     parser.add_argument('--batch-size', type=int, default=256, help='batch size')
     parser.add_argument('--lr', type=float, default=0.001, help='learning rate')
     parser.add_argument('--train-folder', type=str, default="data/CO3D_ClickMe_Training/", help='training image folder')
     parser.add_argument('--val-folder', type=str, default="data/CO3D_ClickMe_Validation/", help='validation image folder')
     args = parser.parse_args()
+
+    wandb_logging = False
+
+    if wandb_logging:
+        wandb.init(entity="jayrgopal", project="harmonization",
+        config={
+        "epochs": args.epochs,
+        "batch_size": args.batch_size,
+        "lr": args.lr,
+        "train_folder": args.train_folder,
+        "val_folder": args.val_folder
+    })
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print("Using device:", device)
