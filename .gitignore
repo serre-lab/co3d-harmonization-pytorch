@@ -6,6 +6,8 @@ wandb/
  
 assets/
 
+logs/
+
 human_clickme_data_processing/
 
 data/CO3D_ClickMe_Validation/
@@ -13,3 +15,8 @@ data/CO3D_ClickMe_Validation/
 data/CO3D_ClickMe_Training/
 
 venv/
+
+scripts/
+
+models/
+

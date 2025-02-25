@@ -1,6 +1,7 @@
 import argparse
 import random
 import os
+import datetime
 import numpy as np
 import pandas as pd
 from PIL import Image
@@ -306,7 +307,7 @@ def compute_harmonization_loss(images, outputs, labels, clickmaps, has_heatmap, 
         # save_debug_images(saliency_pyramid, clickmap_pyramid, levels=[0, 1], num_samples=4)
     
     # Average across levels
-    harmonization_loss = torch.mean(torch.tensor(loss_levels))
+    harmonization_loss = torch.mean(torch.stack(loss_levels))
 
     return harmonization_loss
 
@@ -316,9 +317,11 @@ def compute_harmonization_loss(images, outputs, labels, clickmaps, has_heatmap, 
 def train_one_epoch(model, dataloader, optimizer, device, epoch):
     model.train()
     criterion = nn.CrossEntropyLoss()
-    lambda1 = 1e7  # Harmonization loss weight
+    lambda1 = 1.0  # Harmonization loss weight
     pyramid_levels = 5
     running_loss = 0.0
+    cce_running = 0.0
+    harmonization_running = 0.0
     for batch_idx, batch in enumerate(dataloader):
         images, clickmaps, labels, has_heatmap = batch
         images = images.to(device)
@@ -341,6 +344,8 @@ def train_one_epoch(model, dataloader, optimizer, device, epoch):
         optimizer.step()
 
         running_loss += total_loss.item()
+        cce_running += ce_loss.item()
+        harmonization_running += lambda1 * harmonization_loss.item()
 
         # Debug print
         if batch_idx % 10 == 0:
@@ -350,15 +355,24 @@ def train_one_epoch(model, dataloader, optimizer, device, epoch):
                 f"Harm Loss: {harmonization_loss.item():.4f}, "
                 f"Total Loss: {total_loss.item():.4f}"
             )
+        
+        # DEBUG (1 batch only)
+        # break
 
     avg_loss = running_loss / len(dataloader)
+    cce_avg = cce_running / len(dataloader)
+    harmonization_avg = harmonization_running / len(dataloader)
     print(f"Epoch {epoch} Average Training Loss: {avg_loss:.4f}")
     if wandb_logging:
-        wandb.log({"train_loss": train_loss/len(train_loader),  "cce_loss": ce_loss.item(), "harmonization_loss": harmonization_loss.item()})
+        wandb.log({"train_loss": avg_loss,  "cce_loss": cce_avg, "harmonization_loss": harmonization_avg})
+
 
 def validate(model, dataloader, device, pyramid_levels=5):
     model.eval()
     alignment_scores = []
+    lambda1 = 1.0  # Harmonization loss weight
+    total_cce = 0.0
+    total_harmonization = 0.0
     total_loss = 0.0
 
     criterion = nn.CrossEntropyLoss()
@@ -373,38 +387,55 @@ def validate(model, dataloader, device, pyramid_levels=5):
 
         outputs = model(images)
 
-        loss = criterion(outputs, labels)
+        ce_loss = criterion(outputs, labels)
+        harmonization_loss = compute_harmonization_loss(images=images, outputs=outputs, labels=labels, clickmaps=clickmaps, has_heatmap=has_heatmap, pyramid_levels=pyramid_levels)
+        loss = ce_loss + lambda1 * harmonization_loss
         total_loss += loss.item()
+        total_cce += ce_loss.item()
+        total_harmonization += lambda1 * harmonization_loss.item()
 
+
+        # Compute gradients for the full batch using a one-hot encoding for the true class.
+        grad_outputs = torch.zeros_like(outputs).scatter_(1, labels.view(-1, 1), 1.0)
+        grads = torch.autograd.grad(
+            outputs=outputs, 
+            inputs=images, 
+            grad_outputs=grad_outputs,
+            retain_graph=True
+        )[0]
+
+        # For each sample with a heatmap, compute saliency and alignment score.
         for i in range(images.shape[0]):
             if has_heatmap[i]:
-                output = outputs[i:i+1]
-                label = labels[i:i+1]
-                one_hot = torch.zeros_like(output)
-                one_hot[0, label] = 1.0
-                with torch.backends.cuda.sdp_kernel(enable_flash=False, enable_math=True, enable_mem_efficient=False):
-                    torch.autograd.set_detect_anomaly(True)
-                    grad = torch.autograd.grad(outputs=output, inputs=images[i:i+1], grad_outputs=one_hot, retain_graph=True)[0]
-                saliency = grad.abs().mean(dim=1, keepdim=True)
+                grad_sample = grads[i:i+1]
+                saliency = grad_sample.abs().mean(dim=1, keepdim=True)
                 alignment = compute_spearman_correlation(saliency, clickmaps[i].to(device))
                 alignment_scores.append(alignment)
+        
+        # DEBUG (1 batch only)
+        # break
 
     avg_loss = total_loss / len(dataloader)
+    avg_cce = total_cce / len(dataloader)
+    avg_harmonization = total_harmonization / len(dataloader)
     avg_alignment = sum(alignment_scores) / len(alignment_scores) if alignment_scores else 0.0
 
-    print(f"Validation Loss: {avg_loss:.4f}, Alignment Score: {avg_alignment:.4f}")
+    if wandb_logging:
+        wandb.log({"val_loss": avg_loss,  "cce_loss": avg_cce, "harmonization_loss": avg_harmonization, "alignment_score": avg_alignment})
+
+    print(f"Validation Loss: {avg_loss:.4f}, CCE Loss: {avg_cce:.4f}, Harmonization Loss: {avg_harmonization:.4f}, Alignment Score: {avg_alignment:.4f}")
     return avg_loss, avg_alignment
 
 def collate_fn(batch):
-    images, heatmaps, labels, image_names = zip(*batch)
+    images, heatmaps, labels, has_heatmap = zip(*batch)
     images = torch.stack(images, dim=0)
     labels = torch.tensor(labels, dtype=torch.long)
     heatmaps = list(heatmaps)
-    return images, heatmaps, labels, image_names
+    return images, heatmaps, labels, has_heatmap
 
 def main():
     parser = argparse.ArgumentParser(description='Harmonized ViT Training with ClickMe Dataset')
-    parser.add_argument('--epochs', type=int, default=2, help='number of training epochs')
+    parser.add_argument('--epochs', type=int, default=50, help='number of training epochs')
     parser.add_argument('--batch-size', type=int, default=256, help='batch size')
     parser.add_argument('--lr', type=float, default=0.001, help='learning rate')
     parser.add_argument('--train-folder', type=str, default="data/CO3D_ClickMe_Training/", help='training image folder')
@@ -432,7 +463,8 @@ def main():
     train_dataloader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, collate_fn=collate_fn)
     val_dataloader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, collate_fn=collate_fn)
 
-    model = timm.create_model('vit_small_patch16_224', pretrained=False, num_classes=N_CO3D_CLASSES)
+    MODEL_NAME = 'vit_small_patch16_224'
+    model = timm.create_model(MODEL_NAME, pretrained=False, num_classes=N_CO3D_CLASSES)
     model = nn.DataParallel(model).to(device)
 
     #optimizer = optim.SGD(model.parameters(), lr=args.lr, momentum=0.9)
@@ -443,6 +475,27 @@ def main():
         train_one_epoch(model, train_dataloader, optimizer, device, epoch)
         print("Running Validation...")
         validate(model, val_dataloader, device)
-        
+
+        # DEBUG
+        # break
+    
+    # --- Model Saving Section ---
+    # Optionally run validation one more time to capture final metrics
+    avg_loss, avg_alignment = validate(model, val_dataloader, device)
+
+    # Create a folder inside "models" with today's date as subfolder
+    today = datetime.datetime.now().strftime('%Y-%m-%d')
+    save_dir = os.path.join("/gpfs/data/tserre/jgopal/co3d-harmonization-pytorch/models/", today)
+    os.makedirs(save_dir, exist_ok=True)
+
+    # Construct a filename that includes validation metrics
+    model_filename = f"model_{MODEL_NAME}_loss-{avg_loss:.4f}_align-{avg_alignment:.4f}.pth"
+    save_path = os.path.join(save_dir, model_filename)
+
+    # Save the model's state dictionary. If using DataParallel, consider saving model.module.state_dict()
+    torch.save(model.state_dict(), save_path)
+    print(f"Model saved at: {save_path}")
+
+
 if __name__ == '__main__':
     main()
