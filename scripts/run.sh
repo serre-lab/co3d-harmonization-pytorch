@@ -1,7 +1,8 @@
 #!/bin/bash
 #SBATCH --time=24:00:00
-#SBATCH -n 32
+#SBATCH -n 8
 #SBATCH --mem=80G
+#SBATCH -p gpu --gres=gpu:1
 #SBATCH -J Jay-Harmonization
 #SBATCH -o ../logs/log-Jay-Harmonization-%j.out
 

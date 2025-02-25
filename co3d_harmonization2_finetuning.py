@@ -269,7 +269,6 @@ def compute_harmonization_loss(images, outputs, labels, clickmaps, has_heatmap, 
     """
     device = images.device
     has_heatmap_bool = torch.tensor(has_heatmap).float()
-    has_heatmap_bool = has_heatmap_bool.to(device)
 
     # If no images in this batch have a valid heatmap, skip
     if not has_heatmap_bool.any():
@@ -328,7 +327,6 @@ def train_one_epoch(model, dataloader, optimizer, device, epoch):
         images = images.to(device)
         labels = labels.to(device)
         clickmaps = torch.stack(clickmaps)
-        clickmaps = clickmaps.to(device)
         images.requires_grad_()
 
         optimizer.zero_grad()
@@ -385,7 +383,6 @@ def validate(model, dataloader, device, pyramid_levels=5):
         images = images.to(device)
         labels = labels.to(device)
         clickmaps = torch.stack(clickmaps)
-        clickmaps = clickmaps.to(device)
         images.requires_grad_()
 
         outputs = model(images)
@@ -437,9 +434,9 @@ def collate_fn(batch):
     return images, heatmaps, labels, has_heatmap
 
 def main():
-    parser = argparse.ArgumentParser(description='Harmonized ResNet50 Training with ClickMe Dataset')
-    parser.add_argument('--epochs', type=int, default=50, help='number of training epochs')
-    parser.add_argument('--batch-size', type=int, default=64, help='batch size')
+    parser = argparse.ArgumentParser(description='Harmonized Fine-Tuning TIMM ViT with ClickMe Dataset (CO3D)')
+    parser.add_argument('--epochs', type=int, default=30, help='number of training epochs')
+    parser.add_argument('--batch-size', type=int, default=256, help='batch size')
     parser.add_argument('--lr', type=float, default=0.001, help='learning rate')
     parser.add_argument('--train-folder', type=str, default="data/CO3D_ClickMe_Training/", help='training image folder')
     parser.add_argument('--val-folder', type=str, default="data/CO3D_ClickMe_Validation/", help='validation image folder')
@@ -466,9 +463,8 @@ def main():
     train_dataloader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, collate_fn=collate_fn)
     val_dataloader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, collate_fn=collate_fn)
 
-    #MODEL_NAME = 'vit_small_patch16_224'
-    MODEL_NAME = 'resnet50d.ra2_in1k'
-    model = timm.create_model(MODEL_NAME, pretrained=False, num_classes=N_CO3D_CLASSES)
+    MODEL_NAME = 'vit_small_patch16_224'
+    model = timm.create_model(MODEL_NAME, pretrained=True, num_classes=N_CO3D_CLASSES)
     model = nn.DataParallel(model).to(device)
 
     #optimizer = optim.SGD(model.parameters(), lr=args.lr, momentum=0.9)
