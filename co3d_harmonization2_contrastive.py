@@ -252,77 +252,108 @@ def CE(q, k):
     k = F.softmax(k.reshape(len(k), -1), dim=-1)
     return F.cross_entropy(q, k, reduction='none')
 
-def compute_harmonization_loss(images, outputs, labels, clickmaps, has_heatmap, pyramid_levels=5, metric=CE):
+
+def compute_harmonization_loss(images, outputs, labels, clickmaps, has_heatmap, pyramid_levels=5, metric=CE, contrastive_harmonization=False):
     """
-    Computes the harmonization loss from Fel's paper
+    Computes the harmonization loss that aligns the model's saliency maps with the provided clickmaps 
+    across multiple Gaussian pyramid levels. In addition to the standard loss (minimizing the distance 
+    between the saliency map and its corresponding clickmap), an optional contrastive (CLIP-style) loss 
+    can be applied. This contrastive loss encourages the saliency map of an image to be dissimilar from 
+    the clickmaps of all other images in the batch (for which valid heatmaps exist).
 
     Args:
-        images:         [B, C, H, W]  input images (with requires_grad=True)
-        outputs:        [B, num_classes]  model logits for entire batch
+        images:         [B, C, H, W] input images (with requires_grad=True)
+        outputs:        [B, num_classes] model logits for the batch
         labels:         [B] integer labels for classification
-        clickmaps:      list or tensor of length B containing clickmaps
-        has_heatmap:    [B] bool indicating whether an image has a valid heatmap
-        pyramid_levels: int, number of Gaussian pyramid levels
+        clickmaps:      tensor or list of tensors representing clickmaps; expected shape [B, 1, H, W]
+        has_heatmap:    list or tensor of booleans indicating whether an image has a valid heatmap
+        pyramid_levels: int, number of Gaussian pyramid levels (default: 5)
+        metric:         function to compute cross-entropy based loss (default: CE)
+        contrastive_harmonization: bool, if True, applies an additional CLIP-style contrastive loss (default: False)
 
     Returns:
-        A single scalar tensor (the harmonization loss).
+        A scalar tensor representing the total harmonization loss.
     """
     device = images.device
-    has_heatmap_bool = torch.tensor(has_heatmap).float()
-    has_heatmap_bool = has_heatmap_bool.to(device)
-
-    # If no images in this batch have a valid heatmap, skip
+    has_heatmap_bool = torch.tensor(has_heatmap, dtype=torch.float32, device=device)
     if not has_heatmap_bool.any():
-        return torch.tensor(0.0, device=device)
-    
-    # 1. Create a one-hot version of the classification targets
+        if contrastive_harmonization:
+            return torch.tensor(0.0, device=device), torch.tensor(0.0, device=device)
+        else:
+            return torch.tensor(0.0, device=device)
+
     batch_size, num_classes = outputs.shape
-    one_hot = torch.zeros_like(outputs)  # [B, num_classes]
+    one_hot = torch.zeros_like(outputs)
     one_hot.scatter_(1, labels.unsqueeze(1), 1.0)
 
-    # 2. Zero out one-hot entries where has_heatmap is False
-    # one_hot[~has_heatmap_bool] = 1.0
-    
-    # 3. Compute saliency by taking gradient of outputs wrt the input images
+    # 1. Compute saliency maps via gradients of outputs with respect to images.
     gradients = torch.autograd.grad(
-        outputs=outputs,        # [B, numm_classes]
-        inputs=images,          #  [B, C, H, W]
-        grad_outputs=one_hot,   # [B, num_classes]
-        create_graph=True 
+        outputs=outputs,
+        inputs=images,
+        grad_outputs=one_hot,
+        create_graph=True
     )[0]
-    
-    # 4. Convert gradient to saliency
-    valid_saliency = gradients.abs().amax(dim=1, keepdim=True)  # [B, 1, H, W]
+    valid_saliency = gradients.abs().amax(dim=1, keepdim=True)
+
+    # 2. Build Gaussian pyramids for both saliency and clickmaps.
     saliency_pyramid = build_gaussian_pyramid(valid_saliency, levels=pyramid_levels)
     clickmap_pyramid = build_gaussian_pyramid(clickmaps, levels=pyramid_levels)
 
     heatmap_count = torch.sum(has_heatmap_bool)
-    # 7. Compute MSE across pyramid levels
     loss_levels = []
+    contrastive_loss_levels = []
+    tau = 0.1  # Temperature parameter for contrastive scaling (MOVE OUTSIDE ONCE WE KNOW THIS IS RIGHT)
+
     for level_idx in range(pyramid_levels):
+        # Standard harmonization loss: minimize distance between saliency and its corresponding clickmap.
         level_differences = metric(saliency_pyramid[level_idx], clickmap_pyramid[level_idx])
-        level_loss = torch.sum(level_differences * has_heatmap_bool)/heatmap_count
-
+        level_loss = torch.sum(level_differences * has_heatmap_bool) / heatmap_count
         loss_levels.append(level_loss)
-        # Debug: Save sample images from a couple of pyramid levels
-        # save_debug_images(saliency_pyramid, clickmap_pyramid, levels=[0, 1], num_samples=4)
-    
-    # Average across levels
+
+        # Contrastive (CLIP-style) loss: maximize distance between saliency of image X and clickmaps of other images.
+        if contrastive_harmonization:
+            valid_indices = (has_heatmap_bool == 1).nonzero(as_tuple=True)[0]
+            if valid_indices.numel() > 1:
+                saliency_level = saliency_pyramid[level_idx][valid_indices]  # [N_valid, 1, H, W]
+                clickmap_level = clickmap_pyramid[level_idx][valid_indices]    # [N_valid, 1, H, W]
+                N_valid = saliency_level.shape[0]
+                # Flatten and L2-normalize each map.
+                saliency_flat = saliency_level.view(N_valid, -1)
+                clickmap_flat = clickmap_level.view(N_valid, -1)
+                saliency_norm = F.normalize(saliency_flat, dim=1)
+                clickmap_norm = F.normalize(clickmap_flat, dim=1)
+                # Compute similarity logits matrix.
+                logits = torch.mm(saliency_norm, clickmap_norm.t()) / tau  # [N_valid, N_valid]
+                # Create one-hot targets as an identity matrix.
+                target = torch.eye(N_valid, device=device)
+                # Use the provided metric function to compute loss in both directions.
+                loss_row = metric(logits, target).mean()
+                loss_col = metric(logits.t(), target).mean()
+                contrast_loss = -1 * (loss_row + loss_col) / 2 # MAKE SURE CONTRASTIVE LOSS IS NEGATIVE
+                contrastive_loss_levels.append(contrast_loss)
+            else:
+                contrastive_loss_levels.append(torch.tensor(0.0, device=device))
+
+
     harmonization_loss = torch.mean(torch.stack(loss_levels))
-
-    return harmonization_loss
-
-    # loss = torch.sum(-q * F.log_softmax(student_out[v], dim=-1), dim=-1)
+    if contrastive_harmonization and contrastive_loss_levels:
+        avg_contrastive_loss = torch.mean(torch.stack(contrastive_loss_levels))
+        total_loss = harmonization_loss + avg_contrastive_loss
+        return harmonization_loss, avg_contrastive_loss
+    else:
+        return harmonization_loss
 
 
 def train_one_epoch(model, dataloader, optimizer, device, epoch):
     model.train()
     criterion = nn.CrossEntropyLoss()
-    lambda1 = 2.0  # Harmonization loss weight
+    lambda1 = 1.0  # Harmonization loss weight
+    lambda2 = 1.0  # Contrastive harmonization weight
     pyramid_levels = 5
     running_loss = 0.0
     cce_running = 0.0
     harmonization_running = 0.0
+    cont_harm_running = 0.0
     for batch_idx, batch in enumerate(dataloader):
         images, clickmaps, labels, has_heatmap = batch
         images = images.to(device)
@@ -338,16 +369,17 @@ def train_one_epoch(model, dataloader, optimizer, device, epoch):
             outputs = model(images)
         ce_loss = criterion(outputs, labels)
         # Harmonization loss 
-        harmonization_loss = compute_harmonization_loss(images=images, outputs=outputs, labels=labels, clickmaps=clickmaps, has_heatmap=has_heatmap, pyramid_levels=pyramid_levels)
+        harmonization_loss, avg_contrastive_loss = compute_harmonization_loss(images=images, outputs=outputs, labels=labels, clickmaps=clickmaps, has_heatmap=has_heatmap, pyramid_levels=pyramid_levels, contrastive_harmonization=True)
 
         # Combine losses
-        total_loss = ce_loss + lambda1 * harmonization_loss
+        total_loss = ce_loss + (lambda1 * harmonization_loss) + (lambda2 * avg_contrastive_loss)
         total_loss.backward()
         optimizer.step()
 
         running_loss += total_loss.item()
         cce_running += ce_loss.item()
         harmonization_running += lambda1 * harmonization_loss.item()
+        cont_harm_running += lambda2 * avg_contrastive_loss.item()
 
         # Debug print
         if batch_idx % 10 == 0:
@@ -355,6 +387,7 @@ def train_one_epoch(model, dataloader, optimizer, device, epoch):
                 f"Epoch {epoch} Batch {batch_idx}: "
                 f"CE Loss: {ce_loss.item():.4f}, "
                 f"Harm Loss: {lambda1 * harmonization_loss.item():.4f}, "
+                f"Contrastive Harm Loss: {lambda2 * avg_contrastive_loss.item():.4f}, "
                 f"Total Loss: {total_loss.item():.4f}"
             )
         
@@ -364,17 +397,21 @@ def train_one_epoch(model, dataloader, optimizer, device, epoch):
     avg_loss = running_loss / len(dataloader)
     cce_avg = cce_running / len(dataloader)
     harmonization_avg = harmonization_running / len(dataloader)
+    cont_harm_avg = cont_harm_running / len(dataloader)
+
     print(f"Epoch {epoch} Average Training Loss: {avg_loss:.4f}")
     if wandb_logging:
-        wandb.log({"train_loss": avg_loss,  "cce_loss": cce_avg, "harmonization_loss": harmonization_avg})
+        wandb.log({"train_loss": avg_loss,  "cce_loss": cce_avg, "harmonization_loss": harmonization_avg, "contrastive_harmonization_loss": cont_harm_avg})
 
 
 def validate(model, dataloader, device, pyramid_levels=5):
     model.eval()
     alignment_scores = []
-    lambda1 = 2.0  # Harmonization loss weight
+    lambda1 = 1.0  # Harmonization loss weight
+    lambda2 = 1.0  # Contrastive harmonization loss weight
     total_cce = 0.0
     total_harmonization = 0.0
+    total_cont_harm = 0.0
     total_loss = 0.0
 
     criterion = nn.CrossEntropyLoss()
@@ -391,12 +428,12 @@ def validate(model, dataloader, device, pyramid_levels=5):
         outputs = model(images)
 
         ce_loss = criterion(outputs, labels)
-        harmonization_loss = compute_harmonization_loss(images=images, outputs=outputs, labels=labels, clickmaps=clickmaps, has_heatmap=has_heatmap, pyramid_levels=pyramid_levels)
-        loss = ce_loss + lambda1 * harmonization_loss
+        harmonization_loss, avg_contrastive_loss = compute_harmonization_loss(images=images, outputs=outputs, labels=labels, clickmaps=clickmaps, has_heatmap=has_heatmap, pyramid_levels=pyramid_levels, contrastive_harmonization=True)
+        loss = ce_loss + (lambda1 * harmonization_loss) + (lambda2 * avg_contrastive_loss)
         total_loss += loss.item()
         total_cce += ce_loss.item()
         total_harmonization += lambda1 * harmonization_loss.item()
-
+        total_cont_harm += lambda2 * avg_contrastive_loss.item()
 
         # Compute gradients for the full batch using a one-hot encoding for the true class.
         grad_outputs = torch.zeros_like(outputs).scatter_(1, labels.view(-1, 1), 1.0)
@@ -421,10 +458,11 @@ def validate(model, dataloader, device, pyramid_levels=5):
     avg_loss = total_loss / len(dataloader)
     avg_cce = total_cce / len(dataloader)
     avg_harmonization = total_harmonization / len(dataloader)
+    avg_cont_harm = total_cont_harm / len(dataloader)
     avg_alignment = sum(alignment_scores) / len(alignment_scores) if alignment_scores else 0.0
 
     if wandb_logging:
-        wandb.log({"val_loss": avg_loss,  "cce_loss": avg_cce, "harmonization_loss": avg_harmonization, "alignment_score": avg_alignment})
+        wandb.log({"val_loss": avg_loss,  "cce_loss": avg_cce, "harmonization_loss": avg_harmonization, "contrastive_harmonization_loss": avg_cont_harm, "alignment_score": avg_alignment})
 
     print(f"Validation Loss: {avg_loss:.4f}, CCE Loss: {avg_cce:.4f}, Harmonization Loss: {avg_harmonization:.4f}, Alignment Score: {avg_alignment:.4f}")
     return avg_loss, avg_alignment
@@ -437,10 +475,7 @@ def collate_fn(batch):
     return images, heatmaps, labels, has_heatmap
 
 def main():
-    random.seed(5)
-    np.random.seed(5)
-
-    parser = argparse.ArgumentParser(description='Harmonized ResNet50 Training with ClickMe Dataset')
+    parser = argparse.ArgumentParser(description='Contrastive Harmonized ResNet50 Training with ClickMe Dataset')
     parser.add_argument('--epochs', type=int, default=50, help='number of training epochs')
     parser.add_argument('--batch-size', type=int, default=64, help='batch size')
     parser.add_argument('--lr', type=float, default=0.001, help='learning rate')

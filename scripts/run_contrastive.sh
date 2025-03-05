@@ -1,0 +1,17 @@
+#!/bin/bash
+#SBATCH --time=24:00:00
+#SBATCH -n 4
+#SBATCH --mem=80G
+#SBATCH -p gpu --gres=gpu:1
+#SBATCH -J Jay-Harmonization-Contrastive
+#SBATCH -o ../logs/log-Jay-Harmonization-Contrastive-%j.out
+
+cd /gpfs/data/tserre/jgopal/co3d-harmonization-pytorch/
+
+source venv/bin/activate
+
+wandb login 01f3b5777f198b3606ba1407874f5c7c4b4ce59b
+
+python3 co3d_harmonization2_contrastive.py
+
+
