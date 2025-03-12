@@ -1,8 +1,5 @@
-<<<<<<< HEAD
-=======
 __pycache__/
 
->>>>>>> a83b5cb (minor fixes)
 .DS_Store
 
 data/.DS_Store
@@ -16,3 +13,5 @@ human_clickme_data_processing/
 data/CO3D_ClickMe_Validation/
 
 data/CO3D_ClickMe_Training/
+
+*.npz
