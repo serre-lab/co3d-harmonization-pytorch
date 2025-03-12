@@ -42,8 +42,6 @@ class ClickMe(Dataset):
         self.data = []
         self.data_dictionary = {}
 
-        print("Processing data...")
-
         if is_training:
             # Setup paths and variables for training images
             image_path = "../CO3D_ClickMe_Training2/"
@@ -58,15 +56,15 @@ class ClickMe(Dataset):
             # os.makedirs(output_dir, exist_ok=True)
 
             # Process images WITHOUT ClickMaps.
-            text_file = "/files22_lrsresearch/CLPS_Serre_Lab/projects/prj_video_imagenet/CausalVisionModeling/data_lists/filtered_binocular_renders_train.txt"
-            root_dir = "/files22_lrsresearch/CLPS_Serre_Lab/projects/prj_video_imagenet/PeRFception/data/co3d_v2/"
+            text_file = "data_lists/co3d_train.txt"
+            root_dir = "/oscar/data/tserre/Shared/binocular_trajectory/"
             with open(text_file, 'r') as file:
                 lines = file.readlines()
                 for line in lines:
                     parts = line.split('/')
                     label = parts[1]
                     path = '/'.join(parts[0:3]) + '/' + parts[3]
-                    # path = path.split()[1]
+                    path = path.split()[1]
                     files = parts[4].split()
                     if label not in self.label_to_category_map.keys():
                         self.label_to_category_map[label] = category_index
