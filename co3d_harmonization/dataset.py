@@ -57,7 +57,7 @@ class ClickMe(Dataset):
 
             # Process images WITHOUT ClickMaps.
             text_file = "data_lists/co3d_train.txt"
-            root_dir = "/oscar/data/tserre/Shared/binocular_trajectory/"
+            root_dir = "/oscar/data/tserre/Shared/"
             with open(text_file, 'r') as file:
                 lines = file.readlines()
                 for line in lines:
