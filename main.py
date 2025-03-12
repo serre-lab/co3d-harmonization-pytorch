@@ -7,10 +7,10 @@ from torch import optim
 
 from co3d_harmonization.dataset import ClickMe, collate_fn
 from co3d_harmonization.training import train_one_epoch, validate
-from co3d_harmonization.config import N_CO3D_CLASSES, WANDB_LOGGING
+from co3d_harmonization.config import N_CO3D_CLASSES, WANDB_LOGGING, WANDB_USERNAME, WANDB_PROJECT
 
 if WANDB_LOGGING:
-    wandb.init(entity="grassknoted", project="co3d-harmonization")
+    wandb.init(entity=WANDB_USERNAME, project=WANDB_PROJECT)
 
 def main():
     parser = argparse.ArgumentParser(description='Harmonized Training with ClickMe 2.0')
