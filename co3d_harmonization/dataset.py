@@ -3,19 +3,23 @@ import numpy as np
 import pandas as pd
 from PIL import Image
 import torch
+import json
 from torch.utils.data import Dataset
 from torchvision import transforms
 import torchvision.transforms.functional as tvF
+
+from .config import IMAGE_ITERATOR
+
+CLICKME_DATA_ROOT = "/files22_lrsresearch/CLPS_Serre_Lab/projects/prj_video_imagenet/human_clickme_data_processing/assets/"
 
 # Define data transformations for augmentation and normalization.
 data_transforms = {
     'aug': transforms.Compose([
         transforms.RandomHorizontalFlip(p=0.5),
         transforms.RandomVerticalFlip(p=0.5),
-        transforms.RandomRotation(degrees=(-15, 15)),
     ]),
     'norm': transforms.Compose([
-        transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+        transforms.Normalize([0.5000, 0.5000, 0.5000], [0.5000, 0.5000, 0.5000])
     ]),   
 }
 
@@ -42,81 +46,166 @@ class ClickMe(Dataset):
         self.data = []
         self.data_dictionary = {}
 
+        # Load the median clicks for each image
+        with open('data/co3d_train_medians.json') as json_file:
+            co3d_train_medians = json.load(json_file)
+        with open('data/co3d_val_medians.json') as json_file:
+            co3d_val_medians = json.load(json_file)
+
+        root_dir = "/oscar/data/tserre/Shared/"
+
+        # Process Training Data
         if is_training:
-            # Setup paths and variables for training images
-            image_path = "../CO3D_ClickMe_Training2/"
-            co3d_clickme = pd.read_csv("data/CO3D_ClickMe_Training.csv")
-            output_dir = "assets"
-            image_output_dir = "clickme_test_images"
-            image_shape = [256, 256]
-            exponential_decay = False
-
+            print("Processing data...")
+            co3d_path = "co3d_train"
+            # Setup a dictionary to map labels to category indices.
             category_index = 0
-            # os.makedirs(image_output_dir, exist_ok=True)
-            # os.makedirs(output_dir, exist_ok=True)
 
-            # Process images WITHOUT ClickMaps.
-            text_file = "data_lists/co3d_train.txt"
-            root_dir = "/oscar/data/tserre/Shared/"
+            # 1. Process TRAINING images WITHOUT ClickMaps
+            text_file = "data_lists/co3d_train.txt" # Text file with all the training images
             with open(text_file, 'r') as file:
+                
                 lines = file.readlines()
+
                 for line in lines:
+                    # Reformat the line to get the image path and label
                     parts = line.split('/')
                     label = parts[1]
                     path = '/'.join(parts[0:3]) + '/' + parts[3]
                     path = path.split()[1]
                     files = parts[4].split()
+
+                    # Crate a new label-category mapping if the label is not in the dictionary
                     if label not in self.label_to_category_map.keys():
                         self.label_to_category_map[label] = category_index
                         category_index += 1
-                    # Use a subset of files (every 9th image from first 50 images)
-                    for i in range(0, 50, 9):
+
+                    # Use a subset of files (every {IMAGE_ITERATOR}th image from first 50 images)
+                    for i in range(0, 50, IMAGE_ITERATOR):
+
                         full_path = os.path.join(root_dir, path, files[i].strip())
                         rgb_image = Image.open(full_path).convert("RGB")
                         image_name = "_".join(full_path.split("/")[-4:])
                         label = full_path.split("/")[-4]
+                
+                        # Add it to the data list
                         self.data.append({
                             'image': rgb_image,
-                            'heatmap': torch.tensor(np.zeros((256, 256))),
+                            'heatmap': torch.from_numpy(np.zeros((256, 256))),
                             'category_label': self.label_to_category_map[label],
                             'has_heatmap': False,
+                            'top_k': 0,
                         })
-            print("Done processing training images WITHOUT ClickMaps. There are", len(self.data), "images.")
 
-            # Process images WITH ClickMaps.
-            data = np.load("co3d_train_processed.npz", allow_pickle=True)
-            heatmap_count = 0
+            print(f"1/4: Done processing training images WITHOUT ClickMaps. There are {len(self.data)} images.")
 
-            for file in data.files:
-                image = data[file][None][0]['image']
-                heatmap = data[file][None][0]['heatmap']
-                label = file.split("/")[0]
+
+            # 2. Process TRAINING images WITH ClickMaps.
+            data = os.listdir(os.path.join(CLICKME_DATA_ROOT, co3d_path))
+
+            clickmap_count = 0 # Counter to keep track of the number of clickmaps processed
+
+            for file in data:
+            
+                # Load the Image file and make it a numpy array
+                image_name, object_class = self._process_file_name(file)
+                image_data = Image.open(os.path.join(root_dir, image_name)).convert("RGB")
+
+                # Get the key for the median clickmap
+                image_median_click_key = "/".join(image_name.split('/')[1:])
+                
+                # Load the clickmap and average it across all maps
+                clickmap = np.load(os.path.join(CLICKME_DATA_ROOT, co3d_path, file))
+                clickmap = torch.tensor(clickmap).mean(dim=0)
+
+                if object_class not in self.label_to_category_map.keys():
+                    self.label_to_category_map[object_class] = category_index
+                    category_index += 1
+
+                # Add the image to the data list    
                 self.data.append({
-                    "image": image, 
-                    "heatmap": torch.tensor(heatmap),
-                    "category_label": self.label_to_category_map[label],
+                    "image": image_data, 
+                    "heatmap": clickmap.clone().detach(),
+                    "category_label": self.label_to_category_map[object_class],
                     "has_heatmap": True,
+                    'top_k': 0,# co3d_val_medians[image_median_click_key],
                 })
-                heatmap_count += 1
-            print("Done processing training images WITH ClickMaps. There are", heatmap_count, "heatmaps.")
+                clickmap_count += 1
+            print(f"2/4: Done processing training images WITH ClickMaps. There are {clickmap_count} images.")
 
+        # Process Validation data
         else:
-            # Validation mode: process images with ClickMaps.
-            data = np.load("co3d_val_processed.npz", allow_pickle=True)
-            heatmap_count = 0
+            co3d_path = "co3d_val"
+            
+            text_file = "data_lists/co3d_val.txt" # Text file with all the validation images
+            
+            # 3. Process VALIDATION images WITHOUT ClickMaps
+            with open(text_file, 'r') as file:
+                lines = file.readlines()
+                for line in lines:
+                    # Reformat the line to get the image path and label
+                    parts = line.split('/')
+                    label = parts[1]
+                    path = '/'.join(parts[0:3]) + '/' + parts[3]
+                    path = path.split()[1]
+                    files = parts[4].split()
 
-            for file in data.files:
-                image = data[file][None][0]['image']
-                heatmap = data[file][None][0]['heatmap']
-                label = file.split("/")[0]
+                    # Crate a new label-category mapping if the label is not in the dictionary
+                    if label not in self.label_to_category_map.keys():
+                        self.label_to_category_map[label] = category_index
+                        category_index += 1
+                    
+                    # Use a subset of files (every 9th image from first 50 images)
+                    for i in range(0, 50, IMAGE_ITERATOR):
+
+                        full_path = os.path.join(root_dir, path, files[i].strip())
+                        rgb_image = Image.open(full_path).convert("RGB")
+                        image_name = "_".join(full_path.split("/")[-4:])
+                        label = full_path.split("/")[-4]
+                        
+                        # Add the image to the data list 
+                        self.data.append({
+                            'image': rgb_image,
+                            'heatmap': torch.from_numpy(np.zeros((256, 256))),
+                            'category_label': self.label_to_category_map[label],
+                            'has_heatmap': False,
+                            'top_k': 0,
+                        })
+            print(f"3/4: Done processing validation images WITHOUT ClickMaps. There are {len(self.data)} images.")
+
+            # 4. Process Validation images WITH ClickMaps.
+            data = os.listdir(os.path.join(CLICKME_DATA_ROOT, co3d_path))
+
+            clickmap_count = 0
+
+            for file in data:
+            
+                # Load the Image file and make it a numpy array
+                image_name, object_class = self._process_file_name(file)
+                image_data = Image.open(os.path.join(root_dir, image_name)).convert("RGB")
+                
+                # Load the clickmap and average it across all maps
+                clickmap = np.load(os.path.join(CLICKME_DATA_ROOT, co3d_path, file))
+                clickmap = torch.tensor(clickmap).mean(dim=0)
+
+                # Get the key for the median clickmap
+                image_median_click_key = "/".join(image_name.split('/')[1:])
+
+                if object_class not in self.label_to_category_map.keys():
+                    self.label_to_category_map[object_class] = category_index
+                    category_index += 1
+
+                # Add the image to the data list    
                 self.data.append({
-                    "image": image,
-                    "heatmap": torch.tensor(heatmap),
-                    "category_label": self.label_to_category_map[label],
-                    "has_heatmap": True
+                    "image": image_data, 
+                    "heatmap": clickmap.clone().detach(),
+                    "category_label": self.label_to_category_map[object_class],
+                    "has_heatmap": True,
+                    'top_k': 0,# co3d_val_medians[image_median_click_key],
                 })
-                heatmap_count += 1
-            print("Done processing validation images WITH ClickMaps. There are", heatmap_count, "heatmaps.")
+                clickmap_count += 1
+            print(f"4/4: Done processing validation images WITH ClickMaps. There are {clickmap_count} images.")
+
                 
     def __getitem__(self, index):
         """
@@ -130,25 +219,30 @@ class ClickMe(Dataset):
         Returns:
             tuple: (processed image, processed heatmap, label, has_heatmap flag)
         """
+        # Doing the processing here beacause we need to do it for both image and clickmap
         center_crop = [224, 224]
         img = self.data[index]['image']
         hmp = self.data[index]['heatmap']
         label = self.data[index]['category_label']
         has_heatmap = self.data[index]['has_heatmap']
+        top_k = self.data[index]['top_k']
         
-        # Apply center crop and preprocessing to the image.
+        # Apply center crop and preprocessing to the image
         img = tvF.center_crop(img, center_crop)
         img = self._preprocess_image(img)
-        # Apply center crop and preprocessing to the heatmap.
+
+        # Apply center crop and preprocessing to the heatmap
         hmp = tvF.center_crop(hmp, center_crop)
         hmp = self._preprocess_heatmap(hmp)
         label = self._preprocess_label(label)
-        # Apply augmentation if in training mode.
+
+        # Apply augmentation if in training mode
         if self.is_training:
             img, hmp = self._apply_augmentation(img, hmp)
+            
         # Normalize the image.
         img = data_transforms['norm'](img)
-        return img, hmp, label, has_heatmap
+        return img, hmp, label, has_heatmap#, top_k
 
     def __len__(self):
         """
@@ -171,6 +265,23 @@ class ClickMe(Dataset):
         # Rearrange dimensions to [C, H, W]
         img_tensor = img_tensor.permute(2, 0, 1)
         return img_tensor.to(torch.float32) / 255.0
+    
+    def _process_file_name(self, file):
+        """
+        Get the file name of the image at the given index.
+
+        Args:
+            index (int): Index of the desired sample.
+
+        Returns:
+            str: File name of the image.
+        """
+        file_name = file.split("_")
+        object_category = file_name[0]
+        sequence_id = file_name[1:4]
+        frame_number = file_name[5].split(".")[0]
+        image_file_name = "binocular_trajectory/" + object_category + "/" + "_".join(sequence_id) + "/renders/" + frame_number + ".png"
+        return image_file_name, object_category
 
     def _preprocess_heatmap(self, hmp):
         """

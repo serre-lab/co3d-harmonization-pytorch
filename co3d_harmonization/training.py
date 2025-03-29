@@ -5,9 +5,10 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 
+
 from .losses import *
 from .utils import compute_spearman_correlation
-from .config import WANDB_LOGGING
+from .config import WANDB_LOGGING, EPOCH_INTERVAL
 
 def train_one_epoch(model, dataloader, optimizer, device, epoch, lambda_value=1.0, ce_multiplier=1.0, metric_string=CE):
     """
@@ -74,7 +75,7 @@ def train_one_epoch(model, dataloader, optimizer, device, epoch, lambda_value=1.
             outputs=outputs, 
             labels=labels, 
             clickmaps=clickmaps, 
-            has_heatmap=has_heatmap, 
+            has_heatmap=has_heatmap,
             pyramid_levels=pyramid_levels,
             return_saliency=True,
             metric_string=metric_string
@@ -93,40 +94,62 @@ def train_one_epoch(model, dataloader, optimizer, device, epoch, lambda_value=1.
         total_loss.backward()
         optimizer.step()
 
-        # Visualize and save the plot only for a sample with a valid heatmap.
-        # sample_to_plot = None
-        # for i, flag in enumerate(has_heatmap):
-        #     if flag:
-        #         sample_to_plot = i
-        #         break
+        if batch_idx % EPOCH_INTERVAL == 0:
+            print(f"Batch {batch_idx}/{len(dataloader)}\tCE Loss: {ce_loss.item():.4f}\tHarm Loss: {harmonization_loss.item():.4f}\tTotal Loss: {total_loss.item():.4f}")
 
-        # if sample_to_plot is not None:
-        #     fig, axs = plt.subplots(1, 3, figsize=(15, 5))
-        #     # Display the image.
-        #     axs[0].imshow(images[sample_to_plot].detach().cpu().permute(1, 2, 0))
-        #     axs[0].set_title("Image")
-        #     # Display the saliency map.
-        #     if saliency_map is not None:
-        #         axs[1].imshow(saliency_map[sample_to_plot].detach().cpu().squeeze(0), cmap='viridis')
-        #         axs[1].set_title("Saliency Map")
-        #     else:
-        #         axs[1].text(0.5, 0.5, "No Saliency", horizontalalignment='center')
-        #         axs[1].set_title("Saliency Map")
-        #     # Display the clickmap.
-        #     axs[2].imshow(clickmaps[sample_to_plot].detach().cpu().squeeze(0), cmap='gray')
-        #     axs[2].set_title("Clickmap")
-        #     # Save the figure.
-        #     plot_filename = os.path.join(plot_save_dir, f"epoch{epoch}_batch{batch_idx}_sample{sample_to_plot}.png")
-        #     plt.savefig(plot_filename)
-        #     plt.close(fig)
+            # Visualize on WandB
+            if WANDB_LOGGING:
+                # Check if there is any valid heatmap in the batch
+                has_heatmap_bool = torch.tensor(has_heatmap, device=device).bool()
+                valid_indices = torch.nonzero(has_heatmap_bool, as_tuple=False).flatten()
+                if len(valid_indices) > 0:
+                    # Pick the first valid index
+                    sample_idx = valid_indices[0].item()
+                else:
+                    # If no valid heatmaps, default to sample 0
+                    sample_idx = 0
+                
+                v_image = images[sample_idx].detach().cpu()
+                v_clickmap = clickmaps[sample_idx].detach().cpu()
 
-        if batch_idx % 10 == 0:
-            print(
-                f"Epoch {epoch} Batch {batch_idx}: "
-                f"CE Loss: {ce_loss.item():.4f}, "
-                f"Harm Loss: {harmonization_loss.item():.4f}, "
-                f"Total Loss: {total_loss.item():.4f}"
-            )
+                # The saliency map is already normalized, but the clickmap is not
+                # so we min-max normalize only the clickmap
+                v_clickmap = min_max_normalize_maps(v_clickmap)
+
+                if saliency_map is not None:
+                    v_saliency = saliency_map[sample_idx].detach().cpu()
+                else:
+                    v_saliency = torch.zeros_like(v_clickmap)
+
+                # If the image has shape [3, H, W], transpose to [H, W, 3]
+                if v_image.ndim == 3 and v_image.shape[0] in [1, 3]:
+                    v_image = v_image.permute(1, 2, 0)  # [C, H, W] -> [H, W, C]
+
+                # If the clickmap and saliency has shape [1, H, W] we change it to [H, W]
+                if v_clickmap.ndim == 3 and v_clickmap.shape[0] == 1:
+                    v_clickmap = v_clickmap.squeeze(0)
+                if v_saliency.ndim == 3 and v_saliency.shape[0] == 1:
+                    v_saliency = v_saliency.squeeze(0)
+
+                # Convert those 2D arrays to color images via apply_colormap
+                colored_clickmap = apply_colormap(v_clickmap, cmap="viridis")
+                colored_saliency = apply_colormap(v_saliency, cmap="viridis")
+
+                # Convert the original image to [H,W,3] uint8
+                v_image = denormalize_image(v_image) 
+                # Now convert to uint8
+                v_image_np = (v_image.numpy() * 255).astype(np.uint8)
+
+                # Stacking all 3 together for visualizations
+                stacked_visualization = np.concatenate([v_image_np, colored_clickmap, colored_saliency], axis=1)
+
+                # Also printing correlation for reference
+                current_correlation = compute_spearman_correlation(v_saliency, v_clickmap)
+
+                # wandb Image
+                log_dict = {"training_visualization": wandb.Image(stacked_visualization, caption=f"(Image | Clickmap | Saliency) Correlation: {current_correlation:.4f}")}
+
+                wandb.log(log_dict)
 
     avg_ce_loss = running_ce_loss / len(dataloader)
     avg_harm_loss = running_harm_loss / len(dataloader)
@@ -197,6 +220,7 @@ def validate(model, dataloader, device, pyramid_levels=5):
 
         saliency = gradients.abs().amax(dim=1, keepdim=True)
 
+        # TODO: Do we need top_k here?
         valid_indices = torch.nonzero(has_heatmap_bool).squeeze(1)
         for idx in valid_indices:
             sample_saliency = saliency[idx:idx+1]      
@@ -208,11 +232,4 @@ def validate(model, dataloader, device, pyramid_levels=5):
     accuracy = running_corrects / total_samples
     avg_alignment = (sum(alignment_scores) / len(alignment_scores)) if alignment_scores else 0.0
 
-    print(f"Validation CCE Loss: {avg_ce_loss:.4f}, Accuracy: {accuracy:.4f}, Alignment Score: {avg_alignment:.4f}")
-    if WANDB_LOGGING:
-        wandb.log({
-            "val_avg_ce_loss": avg_ce_loss, 
-            "val_accuracy": accuracy, 
-            "val_alignment_score": avg_alignment,
-        })
     return avg_ce_loss, accuracy, avg_alignment
