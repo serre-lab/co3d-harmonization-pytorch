@@ -4,11 +4,14 @@ import wandb
 import torch
 import torch.nn as nn
 import torch.optim as optim
+import numpy as np
 
 
 from .losses import *
-from .utils import compute_spearman_correlation
-from .config import WANDB_LOGGING, EPOCH_INTERVAL
+from .utils import compute_spearman_correlation, apply_colormap, min_max_normalize_maps, denormalize_image, get_circle_kernel
+from .config import WANDB_LOGGING, EPOCH_INTERVAL, KERNEL_SIZE, KERNEL_SIZE_SIGMA
+
+circle_kernel = get_circle_kernel(KERNEL_SIZE, KERNEL_SIZE_SIGMA)
 
 def train_one_epoch(model, dataloader, optimizer, device, epoch, lambda_value=1.0, ce_multiplier=1.0, metric_string=CE):
     """
@@ -71,6 +74,7 @@ def train_one_epoch(model, dataloader, optimizer, device, epoch, lambda_value=1.
         total_samples += labels.size(0)
 
         harmonization_loss, saliency_map = compute_harmonization_loss(
+            model=model,
             images=images, 
             outputs=outputs, 
             labels=labels, 
@@ -78,7 +82,8 @@ def train_one_epoch(model, dataloader, optimizer, device, epoch, lambda_value=1.
             has_heatmap=has_heatmap,
             pyramid_levels=pyramid_levels,
             return_saliency=True,
-            metric_string=metric_string
+            metric_string=metric_string,
+            get_top_k=True,
         )
         running_harm_loss += harmonization_loss.item()
 
@@ -207,26 +212,81 @@ def validate(model, dataloader, device, pyramid_levels=5):
         running_corrects += (preds == labels).sum().item()
         total_samples += labels.size(0)
 
-        one_hot = torch.zeros_like(outputs)
-        one_hot.scatter_(1, labels.unsqueeze(1), 1.0)
+        # Using the harmonization loss function to compute get only the saliency maps
+        # we don't care about the loss here, only the saliency maps
+        _, saliency_map = compute_harmonization_loss(
+            model=model,
+            images=images, 
+            outputs=outputs, 
+            labels=labels, 
+            clickmaps=clickmaps, 
+            has_heatmap=has_heatmap,
+            pyramid_levels=pyramid_levels,
+            return_saliency=True,
+            metric_string="BCE",
+            get_top_k=True,
+        )
 
-        gradients = torch.autograd.grad(
-            outputs=outputs,
-            inputs=images,
-            grad_outputs=one_hot,
-            retain_graph=True,
-            allow_unused=True
-        )[0]
+        # Processing the clickmaps and saliency maps to compute alignment
+        # saliency is already preprocessed in the harmonization loss function
+        clickmaps = min_max_normalize_maps(clickmaps)
 
-        saliency = gradients.abs().amax(dim=1, keepdim=True)
-
-        # TODO: Do we need top_k here?
+    
+        # Compute alignment here after processing the clickmaps and the saliency maps
         valid_indices = torch.nonzero(has_heatmap_bool).squeeze(1)
         for idx in valid_indices:
-            sample_saliency = saliency[idx:idx+1]      
-            sample_clickmap = clickmaps[idx:idx+1]       
+            sample_saliency = saliency_map[idx:idx+1]      
+            sample_clickmap = clickmaps[idx:idx+1]
             alignment = compute_spearman_correlation(sample_saliency, sample_clickmap)
             alignment_scores.append(alignment)
+        
+        # Validation Visualization: Log only for the first batch.
+        if WANDB_LOGGING:
+            # Check if there is any valid heatmap in the batch
+            has_heatmap_bool = torch.tensor(has_heatmap, device=device).bool()
+            valid_indices = torch.nonzero(has_heatmap_bool, as_tuple=False).flatten()
+            if len(valid_indices) > 0:
+                # Pick the first valid index
+                sample_idx = valid_indices[0].item()
+            else:
+                # If no valid heatmaps, default to sample 0
+                sample_idx = 0
+            
+            v_image = images[sample_idx].detach().cpu()
+            v_clickmap = clickmaps[sample_idx].detach().cpu()
+
+            if saliency_map is not None:
+                v_saliency = saliency_map[sample_idx].detach().cpu()
+            else:
+                v_saliency = torch.zeros_like(v_clickmap)
+
+            # If the image has shape [3, H, W], transpose to [H, W, 3]
+            if v_image.ndim == 3 and v_image.shape[0] in [1, 3]:
+                v_image = v_image.permute(1, 2, 0)  # [C, H, W] -> [H, W, C]
+
+            # If the clickmap and saliency has shape [1, H, W] we change it to [H, W]
+            if v_clickmap.ndim == 3 and v_clickmap.shape[0] == 1:
+                v_clickmap = v_clickmap.squeeze(0)
+            if v_saliency.ndim == 3 and v_saliency.shape[0] == 1:
+                v_saliency = v_saliency.squeeze(0)
+
+            # Convert those 2D arrays to color images via apply_colormap
+            colored_clickmap = apply_colormap(v_clickmap, cmap="viridis")
+            colored_saliency = apply_colormap(v_saliency, cmap="viridis")
+
+            # Convert the original image to [H,W,3] uint8
+            v_image = denormalize_image(v_image) 
+            # Now convert to uint8
+            v_image_np = (v_image.numpy() * 255).astype(np.uint8)
+
+            # Stacking all 3 together for visualizations
+            stacked_visualization = np.concatenate([v_image_np, colored_clickmap, colored_saliency], axis=1)
+
+            # Also printing correlation for reference
+            current_correlation = compute_spearman_correlation(v_saliency, v_clickmap)
+
+            # wandb Image
+            log_dict = {"validation_visualization": wandb.Image(stacked_visualization, caption=f"(Image | Clickmap | Saliency) Correlation: {current_correlation:.4f}")}
 
     avg_ce_loss = running_ce_loss / len(dataloader)
     accuracy = running_corrects / total_samples

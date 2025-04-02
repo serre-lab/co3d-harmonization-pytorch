@@ -4,45 +4,68 @@ from scipy.stats import spearmanr
 import matplotlib.cm as cm
 import numpy as np
 
-from .config import BRUSH_SIZE, BRUSH_SIZE_SIGMA
+from .config import KERNEL_SIZE, KERNEL_SIZE_SIGMA
 
-def get_gaussian_kernel(kernel_size=BRUSH_SIZE, sigma=BRUSH_SIZE_SIGMA, channels=1):
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+def gaussian_blur(heatmap, kernel):
     """
-    Create a Gaussian kernel for blurring.
+    Blurs a heatmap with a Gaussian kernel.
+
+    Parameters
+    ----------
+    heatmap : torch.Tensor
+        The heatmap to blur.
+    kernel : torch.Tensor
+        The Gaussian kernel.
+
+    Returns
+    -------
+    blurred_heatmap : torch.Tensor
+        The blurred heatmap.
+    """
+    heatmap = heatmap.to(device)
+    kernel = kernel.to(device)
+
+    B, C, H, W = heatmap.shape
+    kernel_expanded = kernel.repeat(C, 1, 1, 1)  # shape [C,1,kernel_H,kernel_W]
+
+    blurred = F.conv2d(heatmap, kernel_expanded, padding='same', groups=C)
+
+    return blurred
+
+def get_circle_kernel(size, sigma=None):
+    """
+    Create a flat circular kernel where the values are the average of the total number of on pixels in the filter.
 
     Args:
-        kernel_size (int): Size of the kernel.
-        sigma (float): Standard deviation of the Gaussian.
-        channels (int): Number of channels (kernel is repeated for each channel).
+        size (int): The diameter of the circle and the size of the kernel (size x size).
+        sigma (float, optional): Not used for flat kernel. Included for compatibility. Default is None.
 
     Returns:
-        torch.Tensor: Gaussian kernel of shape [channels, 1, kernel_size, kernel_size].
+        torch.Tensor: A 2D circular kernel normalized so that the sum of its elements is 1.
     """
-    ax = torch.arange(kernel_size, dtype=torch.float32) - (kernel_size // 2)
-    xx, yy = torch.meshgrid(ax, ax, indexing='ij')
-    kernel = torch.exp(-(xx**2 + yy**2) / (2 * sigma**2))
-    kernel = kernel / kernel.sum()
-    kernel = kernel.view(1, 1, kernel_size, kernel_size)
-    return kernel.repeat(channels, 1, 1, 1)
+    # Create a grid of (x,y) coordinates
+    y, x = torch.meshgrid(torch.arange(size), torch.arange(size), indexing='ij')
+    center = (size - 1) / 2
+    radius = (size - 1) / 2
 
-def gaussian_blur(x, kernel_size=BRUSH_SIZE, sigma=BRUSH_SIZE_SIGMA):
-    """
-    Apply Gaussian blur to the input tensor.
+    # Create a mask for the circle
+    mask = (x - center) ** 2 + (y - center) ** 2 <= radius ** 2
 
-    Args:
-        x (torch.Tensor or list): Input tensor of shape [B, C, H, W] or a list of tensors.
-        kernel_size (int): Kernel size for the Gaussian blur.
-        sigma (float): Standard deviation of the Gaussian.
+    # Initialize kernel with zeros and set ones inside the circle
+    kernel = torch.zeros((size, size), dtype=torch.float32)
+    kernel[mask] = 1.0
 
-    Returns:
-        torch.Tensor: Blurred tensor.
-    """
-    if isinstance(x, list):
-        x = torch.stack(x, dim=0)
-    channels = x.shape[1]
-    kernel = get_gaussian_kernel(kernel_size, sigma, channels).to(x.device)
-    padding = kernel_size // 2
-    return F.conv2d(x, kernel, padding=padding, groups=channels)
+    # Normalize the kernel so that the sum of all elements is 1
+    num_on_pixels = mask.sum()
+    if num_on_pixels > 0:
+        kernel = kernel / num_on_pixels
+
+    # Add batch and channel dimensions
+    kernel = kernel.unsqueeze(0).unsqueeze(0)
+
+    return kernel
 
 def build_gaussian_pyramid(x, levels=5):
     """
@@ -57,8 +80,9 @@ def build_gaussian_pyramid(x, levels=5):
     """
     pyramid = []
     current = x
+    circle_kernel = get_circle_kernel(KERNEL_SIZE, KERNEL_SIZE_SIGMA)
     for _ in range(1, levels):
-        blurred = gaussian_blur(current, kernel_size=BRUSH_SIZE, sigma=BRUSH_SIZE_SIGMA)
+        blurred = gaussian_blur(current, circle_kernel)
         downsampled = F.avg_pool2d(blurred, kernel_size=2, stride=2)
         pyramid.append(blurred)
         current = downsampled
@@ -151,7 +175,7 @@ def denormalize_image(tensor):
     elif tensor.ndim == 3 and tensor.shape[0] == 3:
         # x_denorm = x_norm * std[:,None,None] + mean[:,None,None]
         tensor = tensor * std[:, None, None] + mean[:, None, None]
-        
+
     else:
         raise ValueError(f"Tensor shape not recognized for denormalization: {tensor.shape}")
 

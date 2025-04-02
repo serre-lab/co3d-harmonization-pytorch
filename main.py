@@ -7,9 +7,10 @@ from torch import optim
 import numpy as np
 import random
 
+from co3d_harmonization.model import HarmonizationModel, LinearProbeModel
 from co3d_harmonization.dataset import ClickMe, collate_fn
 from co3d_harmonization.training import train_one_epoch, validate
-from co3d_harmonization.config import N_CO3D_CLASSES, WANDB_LOGGING, WANDB_USERNAME, WANDB_PROJECT
+from co3d_harmonization.config import N_CO3D_CLASSES, WANDB_LOGGING, WANDB_USERNAME, WANDB_PROJECT, SALIENCY_MAP_CHANNELS
 
 if WANDB_LOGGING:
     wandb.init(entity=WANDB_USERNAME, project=WANDB_PROJECT)
@@ -26,7 +27,7 @@ def main():
 
     # Parse arguments
     parser = argparse.ArgumentParser(description='Harmonized Training with ClickMe 2.0')
-    parser.add_argument('--epochs', type=int, default=10, help='number of training epochs')
+    parser.add_argument('--epochs', type=int, default=50, help='number of training epochs')
     parser.add_argument('--batch-size', type=int, default=256, help='batch size')
     parser.add_argument('--lr', type=float, default=0.001, help='learning rate')
     parser.add_argument('--train-folder', type=str, default="data/CO3D_ClickMe_Training/", help='training image folder')
@@ -35,6 +36,7 @@ def main():
     parser.add_argument('--ce_multiplier', type=float, default=1.0, help='multiplier for the CE component of the loss')
     parser.add_argument('--metric', type=str, default="cosine", help='metric to compute harmonization loss (CE, MSE, cosine, BCE)')
     parser.add_argument('--model', type=str, default="vit_small_patch16_224.augreg_in21k_ft_in1k", help='TIMM model to use')
+    parser.add_argument('--dropout', type=float, default=0.5, help='dropout rate')
     # parser.add_argument('--pretrained', action='strore_true', default=True, help='TIMM model to use')
     
     args = parser.parse_args()
@@ -58,12 +60,17 @@ def main():
     train_dataloader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, collate_fn=collate_fn)
     val_dataloader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, collate_fn=collate_fn)
 
-    # Create model using timm
-    model = timm.create_model(args.model, pretrained=True, num_classes=N_CO3D_CLASSES)
+    # Create model
+    # model = HarmonizationModel(base_model_name=args.model, num_classes=N_CO3D_CLASSES,  pretrained=True, gradient_map_dim=SALIENCY_MAP_CHANNELS)
+    model = LinearProbeModel(base_model_name=args.model, num_classes=N_CO3D_CLASSES, pretrained=True, gradient_map_dim=SALIENCY_MAP_CHANNELS)
     model = torch.nn.DataParallel(model).to(device)
 
     # SGD Optimizer with momentum; exactly as it is in the paper
+    # WD: 1e-4
+    # LR: 1e-5
     optimizer = optim.SGD(model.parameters(), lr=args.lr, momentum=0.9)
+    # Changed to match AR Model
+    # optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
 
     # Baseline validation pass
     print("Baseline Validation:")
@@ -100,3 +107,6 @@ def main():
 
 if __name__ == '__main__':
     main()
+
+# Normalized Aligment = 0.12
+# Unnormalized ~ 0.09
