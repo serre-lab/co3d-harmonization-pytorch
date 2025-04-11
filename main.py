@@ -34,9 +34,10 @@ def main():
     parser.add_argument('--val-folder', type=str, default="data/CO3D_ClickMe_Validation/", help='validation image folder')
     parser.add_argument('--lambda_value', type=float, default=1.0, help='harmonization loss weight')
     parser.add_argument('--ce_multiplier', type=float, default=1.0, help='multiplier for the CE component of the loss')
-    parser.add_argument('--metric', type=str, default="cosine", help='metric to compute harmonization loss (CE, MSE, cosine, BCE)')
+    parser.add_argument('--metric', type=str, default="cosine", help='metric to compute harmonization loss (CE, MSE, cosine, BCE, masked_BCE)')
     parser.add_argument('--model', type=str, default="vit_small_patch16_224.augreg_in21k_ft_in1k", help='TIMM model to use')
     parser.add_argument('--dropout', type=float, default=0.5, help='dropout rate')
+    parser.add_argument('--pyramid-levels', type=int, default=5, help='number of pyramid levels')
     # parser.add_argument('--pretrained', action='strore_true', default=True, help='TIMM model to use')
     
     args = parser.parse_args()
@@ -74,7 +75,7 @@ def main():
 
     # Baseline validation pass
     print("Baseline Validation:")
-    baseline_loss, baseline_acc, baseline_alignment = validate(model, val_dataloader, device)
+    baseline_loss, baseline_acc, baseline_alignment = validate(model, val_dataloader, device, args.pyramid_levels, args.metric)
     print(f"Baseline Val Loss: {baseline_loss:.4f}, Acc: {baseline_acc:.4f}, Align: {baseline_alignment:.4f}")
     if WANDB_LOGGING:
         wandb.log({
@@ -89,7 +90,7 @@ def main():
         print(f"Epoch {epoch}:")
         # Train for one epoch has the logging within the function
         train_one_epoch(model, train_dataloader, optimizer, device, epoch, args.lambda_value, args.ce_multiplier, args.metric)
-        val_loss, val_acc, val_alignment = validate(model, val_dataloader, device)
+        val_loss, val_acc, val_alignment = validate(model, val_dataloader, device, args.pyramid_levels, args.metric)
 
         # Logging the validaton results
         print(f"Validation CCE Loss: {val_loss:.4f}, Accuracy: {val_acc:.4f}, Alignment Score: {val_alignment:.4f}\n")

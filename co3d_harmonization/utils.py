@@ -81,7 +81,7 @@ def build_gaussian_pyramid(x, levels=5):
     pyramid = []
     current = x
     circle_kernel = get_circle_kernel(KERNEL_SIZE, KERNEL_SIZE_SIGMA)
-    for _ in range(1, levels):
+    for _ in range(0, levels):
         blurred = gaussian_blur(current, circle_kernel)
         downsampled = F.avg_pool2d(blurred, kernel_size=2, stride=2)
         pyramid.append(blurred)

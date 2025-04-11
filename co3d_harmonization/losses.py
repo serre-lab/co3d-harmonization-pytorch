@@ -126,11 +126,13 @@ def _get_metric(metric_string):
     elif metric_string == "cosine":
         return cosine
     elif metric_string == "BCE":
+        return BCE
+    elif metric_string == "maskedBCE":
         return BCE_masked
     else:
         raise ValueError("Invalid metric. Must be 'CE', 'MSE', 'cosine', or 'BCE'.")
 
-def compute_harmonization_loss(model, images, outputs, labels, clickmaps, has_heatmap, pyramid_levels=5, metric_string=CE, return_saliency=False, get_top_k=False):
+def compute_harmonization_loss(model, images, outputs, labels, clickmaps, has_heatmap, pyramid_levels=5, metric_string="CE", return_saliency=False, get_top_k=False):
     """
     Computes the harmonization loss as described in Fel's paper.
 
@@ -235,7 +237,7 @@ def compute_harmonization_loss(model, images, outputs, labels, clickmaps, has_he
 
 
 
-def compute_FEL_harmonization_loss(model, images, outputs, labels, clickmaps, has_heatmap, pyramid_levels=5, metric_string=CE, return_saliency=False, get_top_k=False):
+def compute_FEL_harmonization_loss(model, images, outputs, labels, clickmaps, has_heatmap, pyramid_levels=5, metric_string="CE", return_saliency=False, get_top_k=False):
     """
     Computes the harmonization loss as described in Fel's paper.
 
@@ -286,98 +288,108 @@ def compute_FEL_harmonization_loss(model, images, outputs, labels, clickmaps, ha
     # Absolute saliency value then max across channel dimension
     saliency = gradients.abs().amax(dim=1, keepdim=True)  # shape [B, 1, H, W]
 
-    # Apply Gaussian blur twice
-    saliency = gaussian_blur(saliency, circle_kernel)
-    saliency = gaussian_blur(saliency, circle_kernel)
+    # No need to apply Gaussian blur becuase the pyramid will do that
     saliency_final = min_max_normalize_maps(saliency)
 
     # We now build gaussian pyramids
     saliency_pyramid = build_gaussian_pyramid(saliency_final, levels=pyramid_levels)
     clickmap_pyramid = build_gaussian_pyramid(clickmaps, levels=pyramid_levels)
 
-    # Project the Saliency
-    projected_saliency = model.module.saliency_projection(saliency_final)
+    # Iterate through the levels of the pyramid and compute MSE loss at each layer
+    loss_levels = []
+    for level_idx in range(pyramid_levels):
+        level_differences = metric(saliency_pyramid[level_idx], clickmap_pyramid[level_idx])
+        level_loss = torch.sum(level_differences * has_heatmap_bool) / has_heatmap_bool.sum()
+        loss_levels.append(level_loss)
 
-    if get_top_k:
-        # Compute top-k saliency per sample
-        top_k_saliency = projected_saliency.clone()  # [B, 1, H, W]
-        B, _, H, W = top_k_saliency.shape
-        top_k_saliency = top_k_saliency.view(B, -1)  # [B, H*W]
-        clickmaps_flat = clickmaps.view(B, -1)       # [B, H*W]
-        for i in range(B):
-            if has_heatmap_bool[i]:
-                # Count non-zero pixels in the i-th clickmap as k_i
-                k_i = (clickmaps_flat[i] > 0).sum().item()
-                if k_i > 0:
-                    sal_i = top_k_saliency[i]
-                    top_vals, _ = torch.topk(sal_i, k_i)
-                    threshold_i = top_vals[-1]
-                    sal_i[sal_i < threshold_i] = 0.0
-        projected_saliency = top_k_saliency.view(B, 1, H, W)
-
-    # Normalize heatmaps
-    clickmaps = min_max_normalize_maps(clickmaps)
-    
-    saliency_logits = projected_saliency.squeeze(1)
-
-    # # Mask to only consider pixels where the raw blurred saliency > 0
-    mask = (clickmaps.squeeze(1) > 0).float()
-    
-    # Prepare the target clickmap (also shape [B, H, W])
-    if clickmaps.ndim == 4 and clickmaps.shape[1] == 1:
-        target = clickmaps.squeeze(1)
-    else:
-        target = clickmaps
-    
-    # Compute BCE loss only on the valid pixels
-    loss_per_sample = BCE_masked(saliency_logits, target, mask)
-    harmonization_loss = loss_per_sample.mean()
-    saliency_to_return = saliency_final.clone() if return_saliency else None
+    # Compute the final harmonization loss as the mean of the losses across all levels
+    harmonization_loss = torch.mean(torch.stack(loss_levels))
 
     if return_saliency:
-        return harmonization_loss, saliency_to_return
+        return harmonization_loss, saliency_final.clone()
     return harmonization_loss
 
 
-    # --- Z-score normalization for saliency map per image ---
-    # B, C, H, W = valid_saliency.shape
-    # valid_saliency_flat = valid_saliency.view(B, -1)
-    # mean = valid_saliency_flat.mean(dim=1, keepdim=True)
-    # std = valid_saliency_flat.std(dim=1, keepdim=True) + 1e-7
-    # z_valid_saliency = (valid_saliency_flat - mean) / std
-    # z_valid_saliency = z_valid_saliency.view(B, C, H, W)
-    # valid_saliency = z_valid_saliency
+import torch
+import torch.nn.functional as F
 
+def compute_contrastive_harmonization_loss(
+    images,
+    outputs,
+    labels,
+    clickmaps,
+    has_heatmap,
+    logit_scale_value=1.0,   
+    return_saliency=False
+):
+    """
+    Contrastive harmonization loss inspired by CLIP:
+      1. Compute gradient-based saliency maps for each image
+      2. Interpret each saliency map and its clickmap as two embeddings
+      3. Flatten & L2-normalise
+      4. Compute pairwise dot products across the batch and convert them to logits
+      5. CE loss that matches each saliency with its own clickmap and vice versa
 
-    # saliency_pyramid = build_gaussian_pyramid(saliency_norm, levels=pyramid_levels)
-    # clickmap_pyramid = build_gaussian_pyramid(clickmaps_norm, levels=pyramid_levels)
+    Args:
+        images (torch.Tensor): [B, C, H, W], requires_grad=True
+        outputs (torch.Tensor): [B, num_classes] (model logits)
+        labels (torch.Tensor): [B]
+        clickmaps (torch.Tensor or list): [B, 1, H, W] heatmaps or a list
+        has_heatmap (list or tensor): Boolean indicator per sample
+        logit_scale_value (float): A scalar factor for the logits (like CLIP's logit_scale.exp()).
+        return_saliency (bool): If True, also return the saliency maps.
 
-    # TODO: Add the gaussian pyramid back in
-    # Using Gaussian Pyramid
-    # loss_levels = []
-    # for level_idx in range(pyramid_levels):
-    #     level_differences = metric(saliency_pyramid[level_idx], clickmap_pyramid[level_idx])
-    #     level_loss = torch.sum(level_differences * has_heatmap_bool) / heatmap_count
-    #     loss_levels.append(level_loss)
-    # harmonization_loss = torch.mean(torch.stack(loss_levels))
+    Returns:
+        torch.Tensor or (torch.Tensor, torch.Tensor):
+            contrastive_loss, or (contrastive_loss, saliency_map)
+    """
+    device = images.device
 
+    has_heatmap_bool = torch.tensor(has_heatmap, device=device).bool()
+    if not has_heatmap_bool.any():
+        if return_saliency:
+            return torch.tensor(0.0, device=device), None
+        return torch.tensor(0.0, device=device)
 
-    # Do the k-mask for each training image at an image-level
-    # K value for each map
-    # k_clickmaps = (clickmaps > 0).float().reshape(len(clickmaps), -1).sum(axs=-1)
+    if isinstance(clickmaps, list):
+        clickmaps = torch.stack(clickmaps, dim=0).to(device)
 
-    # # for each image get the K
-    # threshholds = []
-    # k_masks = []
-    # for cm, sal in zip(k_clickmaps, valid_saliency):
-    #     current_thresh = torch.sort(sal, descending=True)[cm]
-    #     k_masks.append((sal > current_thresh))
+    batch_size, num_classes = outputs.shape
+    one_hot = torch.zeros_like(outputs)
+    one_hot.scatter_(1, labels.unsqueeze(1), 1.0)
 
-    # k_masks = torch.stack(k_masks, dim=0).float()
+    gradients = torch.autograd.grad(
+        outputs=outputs,
+        inputs=images,
+        grad_outputs=one_hot,
+        create_graph=True
+    )[0]
 
-    # Apply ReLU so that valuesbelow mean = 0
-    # z_valid_saliency = torch.relu(z_valid_saliency)
-    # # valid pixcel mask
-    # mask = (z_valid_saliency > 0).float()
-    # masked_saliency = z_valid_saliency * mask
-    # masked_clickmaps = clickmaps * mask # Should we mask the clickmaps here
+    saliency = gradients.abs().amax(dim=1, keepdim=True)
+
+    saliency_norm = min_max_normalize_maps(saliency)     # shape [B,1,H,W]
+    clickmaps_norm = min_max_normalize_maps(clickmaps)   # shape [B,1,H,W]
+
+    B, _, H, W = saliency_norm.shape
+    saliency_flat = saliency_norm.view(B, -1)
+    clickmap_flat = clickmaps_norm.view(B, -1)
+
+    saliency_emb = F.normalize(saliency_flat, p=2, dim=1)
+    clickmap_emb = F.normalize(clickmap_flat, p=2, dim=1)
+
+    # Same as the CLIP line: image_features @ text_features.T
+    logits_per_saliency = logit_scale_value * (saliency_emb @ clickmap_emb.t())
+    logits_per_clickmap = logit_scale_value * (clickmap_emb @ saliency_emb.t())
+
+    # Match each sample only with itself
+    targets = torch.arange(B, device=device)
+
+    # Cross-entropy in each direction and divide by 2 to average
+    loss_s = F.cross_entropy(logits_per_saliency, targets)  # Saliency -> Clickmap
+    loss_c = F.cross_entropy(logits_per_clickmap, targets)  # Clickmap -> Saliency
+    contrastive_loss = (loss_s + loss_c) / 2.0
+
+    saliency_to_return = saliency_norm.clone() if return_saliency else None
+    if return_saliency:
+        return contrastive_loss, saliency_to_return
+    return contrastive_loss

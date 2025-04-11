@@ -9,11 +9,11 @@ import numpy as np
 
 from .losses import *
 from .utils import compute_spearman_correlation, apply_colormap, min_max_normalize_maps, denormalize_image, get_circle_kernel
-from .config import WANDB_LOGGING, EPOCH_INTERVAL, KERNEL_SIZE, KERNEL_SIZE_SIGMA
+from .config import WANDB_LOGGING, EPOCH_INTERVAL, KERNEL_SIZE, KERNEL_SIZE_SIGMA, N_CO3D_CLASSES
 
 circle_kernel = get_circle_kernel(KERNEL_SIZE, KERNEL_SIZE_SIGMA)
 
-def train_one_epoch(model, dataloader, optimizer, device, epoch, lambda_value=1.0, ce_multiplier=1.0, metric_string=CE):
+def train_one_epoch(model, dataloader, optimizer, device, epoch, lambda_value=1.0, ce_multiplier=1.0, metric_string="CE"):
     """
     Train the model for one epoch.
 
@@ -90,7 +90,10 @@ def train_one_epoch(model, dataloader, optimizer, device, epoch, lambda_value=1.
         #if saliency_map is not None:
         #    print(f"Batch {batch_idx} Saliency map range: min={saliency_map.min().item():.4f}, max={saliency_map.max().item():.4f}")
 
-        total_loss = ce_multiplier*ce_loss + lambda_value * harmonization_loss
+        # Normalizing values with ln -- For the BCE case
+        total_loss = ((ce_multiplier*ce_loss)/torch.log(N_CO3D_CLASSES)) + ((lambda_value * harmonization_loss)/torch.log(2))
+        # TODO: Cosine & MSE - hyperparameter search
+
         running_total_loss += total_loss.item()
 
         # print("Number of heatmaps:", sum(has_heatmap))
@@ -170,7 +173,7 @@ def train_one_epoch(model, dataloader, optimizer, device, epoch, lambda_value=1.
             "train_accuracy": accuracy
         })
 
-def validate(model, dataloader, device, pyramid_levels=5):
+def validate(model, dataloader, device, pyramid_levels=5, metric_string=CE):
     """
     Validate the model performance on a validation set.
 
@@ -223,7 +226,7 @@ def validate(model, dataloader, device, pyramid_levels=5):
             has_heatmap=has_heatmap,
             pyramid_levels=pyramid_levels,
             return_saliency=True,
-            metric_string="BCE",
+            metric_string=metric_string,
             get_top_k=True,
         )
 
